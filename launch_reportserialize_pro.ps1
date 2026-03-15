@@ -20,10 +20,9 @@ $Retries = 0
 $IsUp = $false
 while (-not $IsUp -and $Retries -lt 30) {
     try {
-        $res = Invoke-WebRequest -Uri "http://localhost:3001" -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
-        if ($res.StatusCode -eq 200) {
-            $IsUp = $true
-        }
+        # Temporarily bypass proxy for health check
+        $res = Invoke-RestMethod -Uri "http://127.0.0.1:3001" -TimeoutSec 1 -ErrorAction Stop
+        $IsUp = $true
     } catch {
         Start-Sleep -Seconds 1
         $Retries++
@@ -31,8 +30,8 @@ while (-not $IsUp -and $Retries -lt 30) {
 }
 
 if ($IsUp) {
-    # Launch Edge in app mode with a dedicated profile to avoid icon caching issues
-    $edgeProcess = Start-Process -FilePath "msedge.exe" -ArgumentList "--app=http://localhost:3001/", "--window-size=1280,800", "--user-data-dir=$env:LOCALAPPDATA\ReportSerializeProApp" -PassThru
+    # Launch Edge in app mode with a dedicated profile to avoid icon caching issues. Disable proxy to prevent VPN interference.
+    $edgeProcess = Start-Process -FilePath "msedge.exe" -ArgumentList "--no-proxy-server", "--app=http://127.0.0.1:3001/", "--window-size=1280,800", "--user-data-dir=$env:LOCALAPPDATA\ReportSerializeProApp", "--disable-features=msWebOOUI,msPdfOOUI,msEdgeMiniMenu" -PassThru
     # Wait for Edge to close
     Wait-Process -Id $edgeProcess.Id
 }

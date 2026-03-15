@@ -11,12 +11,13 @@
 @layer base {
   .prose table {
     @apply border-collapse border border-[#141414]/10 rounded-lg overflow-hidden w-full my-6;
+    table-layout: fixed;
   }
   .prose thead {
     @apply bg-[#F5F5F0]/80 border-b border-[#141414]/10;
   }
   .prose th, .prose td {
-    @apply border border-[#141414]/10 px-4 py-3 text-sm text-left;
+    @apply border border-[#141414]/10 px-4 py-3 text-sm text-left relative;
   }
   .prose th {
     @apply font-bold text-[#141414] uppercase tracking-wider text-[11px] bg-[#F5F5F0]/50;
@@ -42,4 +43,21 @@
 .ProseMirror p {
   margin-top: 1.25em;
   margin-bottom: 1.25em;
+}
+
+/* Tiptap Table Resizing */
+.ProseMirror .column-resize-handle {
+  background-color: #5A5A40;
+  bottom: 0;
+  position: absolute;
+  right: -2px;
+  pointer-events: none;
+  top: 0;
+  width: 4px;
+  z-index: 20;
+}
+
+.ProseMirror.resize-cursor {
+  cursor: ew-resize;
+  cursor: col-resize;
 }

@@ -37,7 +37,10 @@ import {
   RotateCcw,
   Target,
   History,
-  Type as TypeIcon
+  Type as TypeIcon,
+  FolderArchive,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -110,6 +113,23 @@ const Tooltip = ({ children, text, className = "" }: { children: React.ReactNode
   );
 };
 
+const cleanTitle = (rawTitle: string) => {
+  if (!rawTitle) return '';
+  let text = rawTitle.replace(/<[^>]+>/g, ' ');
+  text = text.replace(/\*{2,}/g, '');
+  text = text.replace(/#/g, '');
+  text = text.replace(/《[^》]+》[\s\-\:]*/g, '');
+  
+  const match = text.match(/[-—]\s*([^:：!！\?？,，]+)/);
+  if (match) {
+    return match[1].trim();
+  }
+  
+  text = text.replace(/^(?:连载\s*[一二三四五六七八九十\d]+\s*[\-\:：\s]*)+/g, '');
+  text = text.split(/[-—:：!！\?？,，|]/)[0].trim();
+  return text;
+};
+
 export default function App() {
   const [issues, setIssues] = useState<Chapter[]>(INITIAL_ISSUES);
   const [activeId, setActiveId] = useState<number | 'plan'>('plan');
@@ -127,6 +147,8 @@ export default function App() {
   const [showRawMd, setShowRawMd] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [savedZipPath, setSavedZipPath] = useState<string | null>(null);
+  const [showSaveModal, setShowSaveModal] = useState(false);
 
   const publishMenuRef = useRef<HTMLDivElement>(null);
   const downloadMenuRef = useRef<HTMLDivElement>(null);
@@ -136,6 +158,7 @@ export default function App() {
 
   const updateContentRef = useRef<(newContent: string, shouldCreateVersion?: boolean) => void>(() => {});
   const saveVersionRef = useRef<() => void>(() => {});
+  const isUpdatingRef = useRef<boolean>(false);
 
   // Tiptap Editor Setup
   const editor = useEditor({
@@ -159,6 +182,7 @@ export default function App() {
     ],
     content: '',
     onUpdate: ({ editor }) => {
+      if (isUpdatingRef.current) return;
       const md = (editor.storage as any).markdown.getMarkdown();
       updateContentRef.current(md);
     },
@@ -186,6 +210,7 @@ export default function App() {
   const [selectedTone, setSelectedTone] = useState(TONE_OPTIONS[0].id);
   const [showStrategyModal, setShowStrategyModal] = useState(false);
   const [reportText, setReportText] = useState('');
+  const [reportSummary, setReportSummary] = useState('');
   const [fileName, setFileName] = useState('');
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
   const [isGeneratingAll, setIsGeneratingAll] = useState(false);
@@ -194,6 +219,76 @@ export default function App() {
   const [planApproved, setPlanApproved] = useState(false);
   const [serialPlan, setSerialPlan] = useState<string>(DEFAULT_SERIAL_PLAN);
   const [planVersions, setPlanVersions] = useState<Version[]>([]);
+  const [ctaTemplate, setCtaTemplate] = useState('');
+  const [isStateLoaded, setIsStateLoaded] = useState(false);
+
+  // Load state on mount
+  useEffect(() => {
+    fetch('/api/load-state')
+      .then(res => {
+        if (!res.ok) throw new Error('No state');
+        return res.json();
+      })
+      .then(data => {
+        if (data && typeof data === 'object') {
+          if (data.issues) setIssues(data.issues);
+          if (data.activeId) setActiveId(data.activeId);
+          if (data.chatMessages) setChatMessages(data.chatMessages);
+          if (data.companyBusiness) setCompanyBusiness(data.companyBusiness);
+          if (data.reportPurpose) setReportPurpose(data.reportPurpose);
+          if (data.selectedTone) setSelectedTone(data.selectedTone);
+          if (data.reportText) setReportText(data.reportText);
+          if (data.reportSummary) setReportSummary(data.reportSummary);
+          if (data.fileName) setFileName(data.fileName);
+          if (data.isPlanGenerated !== undefined) setIsPlanGenerated(data.isPlanGenerated);
+          if (data.planApproved !== undefined) setPlanApproved(data.planApproved);
+          if (data.serialPlan) setSerialPlan(data.serialPlan);
+          if (data.planVersions) setPlanVersions(data.planVersions);
+          if (data.ctaTemplate) setCtaTemplate(data.ctaTemplate);
+        }
+        setIsStateLoaded(true);
+      })
+      .catch(err => {
+         console.log('No prior state found', err);
+         setIsStateLoaded(true);
+      });
+  }, []);
+
+  // Save state slightly debounced
+  useEffect(() => {
+    if (!isStateLoaded) return;
+    if (!fileName && issues.length === 0 && !serialPlan) return;
+    
+    const handler = setTimeout(() => {
+      const state = {
+        issues,
+        activeId,
+        chatMessages,
+        companyBusiness,
+        reportPurpose,
+        selectedTone,
+        reportText,
+        reportSummary,
+        fileName,
+        isPlanGenerated,
+        planApproved,
+        serialPlan,
+        planVersions,
+        ctaTemplate
+      };
+      fetch('/api/save-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state)
+      }).catch(err => console.error('Failed to save state', err));
+    }, 1500);
+
+    return () => clearTimeout(handler);
+  }, [
+    isStateLoaded, issues, activeId, chatMessages, companyBusiness, reportPurpose,
+    selectedTone, reportText, reportSummary, fileName, isPlanGenerated,
+    planApproved, serialPlan, planVersions, ctaTemplate
+  ]);
   
   // Resizable Sidebars State
   const [sidebarWidth, setSidebarWidth] = useState(288);
@@ -207,7 +302,7 @@ export default function App() {
   const [regenerateRequirements, setRegenerateRequirements] = useState('');
   const [activeQuickActionMenu, setActiveQuickActionMenu] = useState<string | null>(null);
 
-  // Click outside to close menus
+  // Click outside and Esc to close menus
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
@@ -228,9 +323,24 @@ export default function App() {
         setShowVersionMenu(false);
       }
     };
+    
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowRegenerateModal(false);
+        setShowStrategyModal(false);
+        setShowSaveModal(false);
+        setShowConfig(false);
+        setFloatingMenu({ ...floatingMenu, visible: false });
+        setShowTip(false);
+      }
+    };
 
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [showPublishMenu, showDownloadMenu, showIssueSelector, showConfirmAll, showVersionMenu]);
 
   const startResizingSidebar = useCallback((e: React.MouseEvent) => {
@@ -320,7 +430,9 @@ export default function App() {
     if (editor && activeIssue) {
       const currentMd = (editor.storage as any).markdown.getMarkdown();
       if (currentMd !== activeIssue.content) {
+        isUpdatingRef.current = true;
         editor.commands.setContent(activeIssue.content);
+        setTimeout(() => { isUpdatingRef.current = false; }, 10);
       }
     }
   }, [activeId, editor, activeIssue.content]);
@@ -328,6 +440,18 @@ export default function App() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (issues.length > 0 || serialPlan) {
+      await downloadMarkdown('all', true);
+      setIssues([]);
+      setActiveId('plan');
+      setSerialPlan(DEFAULT_SERIAL_PLAN);
+      setPlanVersions([]);
+      setChatMessages([]);
+      setReportSummary('');
+      setIsPlanGenerated(false);
+      setPlanApproved(false);
+    }
 
     setToast(null);
     setFileName(file.name);
@@ -368,6 +492,12 @@ export default function App() {
         return;
       }
 
+      if (trimmedText.length > 500000) {
+        setUploadError(`文件内容过长（约 ${Math.round(trimmedText.length / 10000)} 万字符），超出 50 万字符处理上限。请精简报告或分批上传。`);
+        setIsPdfLoading(false);
+        return;
+      }
+
       setReportText(trimmedText);
       setIsPdfLoading(false);
       
@@ -385,6 +515,42 @@ export default function App() {
         setUploadError("PDF 解析失败，请确保文件未加密且格式正确");
       }
     }
+  };
+
+  const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const stateFile = zip.file(".app_state.json");
+      if (stateFile) {
+        const stateStr = await stateFile.async("string");
+        const data = JSON.parse(stateStr);
+        if (data.issues) setIssues(data.issues);
+        if (data.activeId !== undefined) setActiveId(data.activeId);
+        if (data.chatMessages) setChatMessages(data.chatMessages);
+        if (data.companyBusiness) setCompanyBusiness(data.companyBusiness);
+        if (data.reportPurpose) setReportPurpose(data.reportPurpose);
+        if (data.selectedTone) setSelectedTone(data.selectedTone);
+        if (data.reportText) setReportText(data.reportText);
+        if (data.reportSummary) setReportSummary(data.reportSummary);
+        if (data.fileName) setFileName(data.fileName);
+        if (data.isPlanGenerated !== undefined) setIsPlanGenerated(data.isPlanGenerated);
+        if (data.planApproved !== undefined) setPlanApproved(data.planApproved);
+        if (data.serialPlan) setSerialPlan(data.serialPlan);
+        if (data.planVersions) setPlanVersions(data.planVersions);
+        if (data.ctaTemplate) setCtaTemplate(data.ctaTemplate);
+        showToast("项目包已成功加载，恢复进度", "success");
+      } else {
+        showToast("压缩包中找不到项目状态文件", "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showToast("项目包解析失败", "error");
+    }
+    
+    e.target.value = '';
   };
 
   const processReport = async (text: string) => {
@@ -408,35 +574,37 @@ export default function App() {
     try {
       // Step 1: Generate Plan and extract business info if missing
       const planResponse = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `你是一个资深的公众号编辑。请根据以下报告内容，规划一个连载系列任务。
-        报告内容摘要：${text.substring(0, 8000)}
+        model: "gemini-3.1-pro-preview",
+        contents: `你是一个资深的公众号编辑。请根据以下报告全文内容，先进行提炼总结，然后规划一个连载系列任务。
+        报告内容摘要：${text.substring(0, 500000)}
         
         ${companyBusiness ? `公司背景：${companyBusiness}` : ''}
         ${reportPurpose ? `分解目的与要求：${reportPurpose}` : ''}
         ${selectedTone ? `整体调性：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}` : ''}
+        ${ctaTemplate ? `【强制引流内容（请原样输出，不要修改分毫）】：\n${ctaTemplate}` : ''}
         
         请输出一个 JSON 格式的对象，包含：
         1. businessName: 从报告中识别的公司名称或业务方向
-        2. plan: Markdown 格式的连载规划。必须严格包含以下三个部分，且风格专业、犀利：
+        2. reportSummary: 万字以内的详细报告全文提炼总结（包含各章节核心要点）
+        3. plan: Markdown 格式的连载规划。必须严格包含以下三个部分，且风格专业、犀利：
            ## 1. 策划思路
            - **核心目标**：(例如：通过连载建立专业形象，吸引精准 B 端客户)
            - **调性定位**：(例如：专业、前瞻、实战、犀利)
            - **引流技巧**：(例如：抛出行业痛点问题，在关键处留白引导咨询)
            
            ## 2. 连载目录规划
-           请使用 Markdown 表格形式，包含以下列：
-           | 期数 | 主题方向 | 篇目标题 | 核心痛点 | 对应报告章节 |
-           | :--- | :--- | :--- | :--- | :--- |
+           请根据实际内容提取的总结决定是一章分多期，还是多章并一期。使用 Markdown 表格形式，包含以下列：
+           | 期数 | 主题方向 | 篇目标题 | 对应报告章节 |
+           | :--- | :--- | :--- | :--- |
            (至少 6-8 期)
            
            ## 3. 引流模板
-           使用 Markdown 引用块 (>) 格式，包含【福利预告】、报告简介、引导语及关键词回复建议。
+           ${ctaTemplate ? '严格使用前文提供的【强制引流内容】，并原样输出作为第3部分，不允许更改任何一个字。' : '使用 Markdown 引用块 (>) 格式，包含【福利预告】、报告简介、引导语及关键词回复建议。'}
            
-        3. chapters: 篇目列表（与目录规划一致），每篇包含 id, title (对应主题方向), outline (结合核心痛点和章节)。
+        4. chapters: JSON数组（与目录规划一致），每篇包含 id, title (格式必须为：连载X - 篇目标题，如"连载1 - 制度写在纸上，业务跑在圈外"), outline (结合报告各章节内容列举大致提纲)。
         
         请严格按照 JSON 格式输出。`,
-        config: { responseMimeType: "application/json" }
+        config: { responseMimeType: "application/json", temperature: 0.2 }
       });
 
       if (!planResponse.text) {
@@ -446,6 +614,9 @@ export default function App() {
       const data = JSON.parse(planResponse.text);
       if (data.businessName && !companyBusiness) {
         setCompanyBusiness(data.businessName);
+      }
+      if (data.reportSummary) {
+        setReportSummary(data.reportSummary);
       }
       
       const newPlan = data.plan || '';
@@ -559,7 +730,7 @@ export default function App() {
     setIsPlanLoading(true);
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-3.1-pro-preview",
         contents: `根据以下连载规划，生成各篇目的大纲，并撰写第一篇的完整内容任务。
         规划内容：${serialPlan}
         调性要求：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}
@@ -567,12 +738,12 @@ export default function App() {
         请以JSON格式返回，结构如下：
         {
           "chapters": [
-            { "id": 1, "title": "标题", "outline": "大纲内容", "content": "第一篇的完整Markdown内容", "status": "draft", "versions": [{ "version": "1.0", "content": "第一篇的完整Markdown内容", "timestamp": 123456789 }] },
-            { "id": 2, "title": "标题", "outline": "大纲内容", "content": "", "status": "pending", "versions": [] },
+            { "id": 1, "title": "连载1 - 篇目小标题", "outline": "大纲内容", "content": "第一篇的完整Markdown内容", "status": "draft", "versions": [{ "version": "1.0", "content": "第一篇的完整Markdown内容", "timestamp": 123456789 }] },
+            { "id": 2, "title": "连载2 - 篇目小标题", "outline": "大纲内容", "content": "", "status": "pending", "versions": [] },
             ...
           ]
         }`,
-        config: { responseMimeType: "application/json" }
+        config: { responseMimeType: "application/json", temperature: 0.2 }
       });
       const data = JSON.parse(response.text || '{}');
       if (data.chapters) {
@@ -605,18 +776,40 @@ export default function App() {
     try {
       const prevChapters = issues.filter(i => i.id < id && i.content).map(i => i.content).join('\n\n');
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-3.1-pro-preview",
         contents: `你正在撰写一个连载系列。
         公司业务：${companyBusiness}
         调性：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}
+        
+        【全篇提炼总结】
+        ${reportSummary.substring(0, 10000)}
+        
+        【原文完整资料 caching】
+        （请根据大纲需要，从以下完整报告中智能调取所需细节及章节，作为素材基础）
+        ${reportText.substring(0, 500000)}
+        
         前序内容回顾：${prevChapters.substring(0, 3000)}
         当前篇目大纲：${chapter.outline}
         ${extraRequirements ? `用户额外要求：${extraRequirements}` : ''}
         
-        请撰写本篇（${chapter.title}）的完整Markdown内容。`,
+        【核心写作约束 (Hard Constraints)】
+        1. **去除AI味**：绝对不得使用“综上所述”、“总而言之”、“在这个瞬息万变的时代”、“不可否认”、“意味着”、“至关重要”、“见证”、“不可或缺”、“深入探讨”等八股文过渡词。
+        2. **说人话/口语化**：语气必须亲切、清晰、直观。使用短平快的断句，打断又长又臭的从句翻译腔（如“不仅是…更是…”）。避免空泛抽象的词汇，坚决拒绝“AI味”的说教风格。
+        3. **拒绝浮夸与俚语滥用**：禁用以下网梗及假大空黑话：赋能、闭环、抓手、卷上天、手搓、秒成渣、彻底重塑、爆发式等。用正常的行业词汇（如“支持/流程/切入点”）取而代之。
+        4. **读者视角 (Humanizer)**：少讲大道理，多讲具体的业务场景和真实案例。像人一样面对面讲业务，具备情绪价值和启发性。主张“言之有物，不讲废话”。
+        
+        请强执行以上约束，并基于原始报告内容，撰写本篇（${chapter.title}）的完整Markdown内容。`,
+        config: { temperature: 0.3 }
       });
       
-      const newContent = response.text || '';
+      let newContent = response.text || '';
+      
+      // Extract and append CTA template from config or serialPlan
+      const appliedCta = ctaTemplate.trim() || (serialPlan.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/)?.[1] || '').trim();
+      if (appliedCta && !newContent.includes(appliedCta)) {
+        newContent += '\n\n---\n\n' + appliedCta;
+      }
+
       setIssues(prev => prev.map(i => {
         if (i.id === id) {
           const hasOldContent = !!i.content;
@@ -665,17 +858,39 @@ export default function App() {
           .join('\n\n');
           
         const response = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
+          model: "gemini-3.1-pro-preview",
           contents: `你正在撰写一个连载系列。
           公司业务：${companyBusiness}
           调性：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}
+          
+          【全篇提炼总结】
+          ${reportSummary.substring(0, 10000)}
+          
+          【原文完整资料 caching】
+          （请根据大纲需要，从以下完整报告中智能调取所需细节及章节，作为素材基础）
+          ${reportText.substring(0, 500000)}
+          
           前序内容回顾：${prevChapters.substring(0, 3000)}
           当前篇目大纲：${chapter.outline}
           
-          请撰写本篇（${chapter.title}）的完整Markdown内容。`,
+          【核心写作约束 (Hard Constraints)】
+          1. **去除AI味**：绝对不得使用“综上所述”、“总而言之”、“在这个瞬息万变的时代”、“不可否认”、“意味着”、“至关重要”、“见证”、“不可或缺”、“深入探讨”等八股文过渡词。
+          2. **说人话/口语化**：语气必须亲切、清晰、直观。使用短平快的断句，打断又长又臭的从句翻译腔（如“不仅是…更是…”）。避免空泛抽象的词汇，坚决拒绝“AI味”的说教风格。
+          3. **拒绝浮夸与俚语滥用**：禁用以下网梗及假大空黑话：赋能、闭环、抓手、卷上天、手搓、秒成渣、彻底重塑、爆发式等。用正常的行业词汇（如“支持/流程/切入点”）取而代之。
+          4. **读者视角 (Humanizer)**：少讲大道理，多讲具体的业务场景和真实案例。像人一样面对面讲业务，具备情绪价值和启发性。主张“言之有物，不讲废话”。
+          
+          请强执行以上约束，并基于原始报告内容，撰写本篇（${chapter.title}）的完整Markdown内容。`,
+          config: { temperature: 0.3 }
         });
         
-        const newContent = response.text || '';
+        let newContent = response.text || '';
+        
+        // Extract and append CTA template from config or serialPlan
+        const appliedCta = ctaTemplate.trim() || (serialPlan.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/)?.[1] || '').trim();
+        if (appliedCta && !newContent.includes(appliedCta)) {
+          newContent += '\n\n---\n\n' + appliedCta;
+        }
+
         currentIssues = currentIssues.map(i => {
           if (i.id === chapter.id) {
             const hasOldContent = !!i.content;
@@ -705,7 +920,7 @@ export default function App() {
     }
   };
 
-  const downloadMarkdown = async (type: 'current' | 'all') => {
+  const downloadMarkdown = async (type: 'current' | 'all', isSilent: boolean = false) => {
     if (type === 'current') {
       if (!activeIssue.content || activeIssue.content.trim() === '') {
         showToast("内容为空，无法保存");
@@ -721,26 +936,85 @@ export default function App() {
       showToast(`已保存：${activeIssue.title}`, 'success');
     } else {
       const contentIssues = issues.filter(i => i.content && i.content.trim() !== '');
-      if (contentIssues.length === 0) {
+      if (contentIssues.length === 0 && !isSilent) {
         showToast("没有已生成内容的篇目，无法保存");
         return;
       }
 
       const zip = new JSZip();
-      contentIssues.forEach(issue => {
-        zip.file(`${issue.title}.md`, issue.content);
+      if (contentIssues.length > 0) {
+        contentIssues.forEach(issue => {
+          zip.file(`${issue.title}.md`, issue.content);
+        });
+      }
+      
+      let planContent = `# 连载规划\n\n`;
+      planContent += `## 业务背景\n${companyBusiness}\n\n`;
+      planContent += `## 报告目的\n${reportPurpose}\n\n`;
+      planContent += `## 整体调性\n${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}\n\n`;
+      planContent += `## 全篇提炼总结\n${reportSummary}\n\n`;
+      planContent += `## 规划详情\n${serialPlan}\n`;
+      zip.file(`00_生成策略与连载规划.md`, planContent);
+
+      let chatContent = `# AI助手对话记录\n\n`;
+      chatMessages.forEach((msg, idx) => {
+        chatContent += `### ${msg.role === 'user' ? '用户' : 'AI助手'} (${idx + 1})\n\n`;
+        chatContent += `${msg.content}\n\n`;
       });
+      zip.file(`00_AI助手对话记录.md`, chatContent);
+
+      const state = {
+        issues,
+        activeId,
+        chatMessages,
+        companyBusiness,
+        reportPurpose,
+        selectedTone,
+        reportText,
+        reportSummary,
+        fileName,
+        isPlanGenerated,
+        planApproved,
+        serialPlan,
+        planVersions
+      };
+      zip.file(`.app_state.json`, JSON.stringify(state));
 
       const blob = await zip.generateAsync({ type: 'blob' });
-      const element = document.createElement("a");
-      element.href = URL.createObjectURL(blob);
-      element.download = `连载系列_全部篇目.zip`;
-      document.body.appendChild(element);
-      element.click();
-      document.body.removeChild(element);
       
-      const savedTitles = contentIssues.map(i => i.title).join('、');
-      showToast(`已保存：${savedTitles}`, 'success');
+      try {
+        const arrayBuffer = await blob.arrayBuffer();
+        const response = await fetch('/api/save-zip', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream'
+          },
+          body: arrayBuffer
+        });
+        const result = await response.json();
+        if (result.path) {
+          if (!isSilent) {
+            setSavedZipPath(result.path);
+            setShowSaveModal(true);
+          }
+        } else {
+          const element = document.createElement("a");
+          element.href = URL.createObjectURL(blob);
+          element.download = `连载系列_全部篇目.zip`;
+          document.body.appendChild(element);
+          element.click();
+          document.body.removeChild(element);
+          showToast(`已下载全部篇目`, 'success');
+        }
+      } catch (err) {
+        const element = document.createElement("a");
+        element.href = URL.createObjectURL(blob);
+        element.download = `连载系列_全部篇目.zip`;
+        document.body.appendChild(element);
+        element.click();
+        document.body.removeChild(element);
+        showToast(`已下载全部篇目`, 'success');
+      }
     }
     setShowDownloadMenu(false);
   };
@@ -751,13 +1025,13 @@ export default function App() {
   };
 
   const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
     if (!editor) return;
 
     const { from, to } = editor.state.selection;
     const selectedText = editor.state.doc.textBetween(from, to, ' ');
 
     if (selectedText.trim()) {
-      e.preventDefault();
       setSelectionInfo({ text: selectedText, start: from, end: to });
       setFloatingMenu({ visible: true, x: e.clientX, y: e.clientY });
     }
@@ -769,7 +1043,7 @@ export default function App() {
     setIsFloatingLoading(true);
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-3.1-pro-preview",
         contents: `你是一个专业的文案编辑。请根据用户的要求修改选中的文本。
         
         选中的文本：
@@ -842,33 +1116,40 @@ export default function App() {
 
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-3.1-pro-preview",
         contents: [
           {
             role: "user",
             parts: [{
-              text: `你是一个专业的文案编辑助手。请根据用户的要求修改或建议当前文章。
+              text: `你是一个专业的文案编辑助手。请根据用户的要求修改、建议当前文章，或回答关于源报告的问题。
         
-        当前文章内容：
+        【全篇提炼总结】
+        ${reportSummary.length > 0 ? reportSummary.substring(0, 10000) : '未提供'}
+
+        【原文参考资料】
+        (此处为长文本缓存，包含了文章所需的全部基础信息，如果用户提问原报告相关内容，请直接从中查找准确回答，不要胡编乱造)
+        ${reportText.length > 0 ? reportText.substring(0, 500000) : '未提供'}
+        
+        【当前文章内容】
         ${activeIssue.content}
         
-        用户要求：
+        【用户要求】
         ${userMessage}
         
-        ${isSuggestionOnly ? "请仅提供具体的改进建议点，不要返回修改后的全文内容。请务必使用纯文本格式，不要使用 Markdown 标记（如 #, *, - 等）。" : "如果用户要求修改内容，请直接返回修改后的全文 Markdown。如果用户要求建议，请提供具体的改进点。"}`
+        ${isSuggestionOnly ? "请仅提供具体的改进建议点。如果用户提问关于原报告的问题（比如'第四章讲了什么'），请基于【原文参考资料】给出详细回答。请务必使用纯文本格式，不要使用 Markdown 标记（如 #, *, - 等）。" : "如果用户要求修改内容，请直接返回修改后的全文 Markdown。\n\n【极度重要】：在进行任何长度、语气或其他文章内容的修改润色时，你必须**绝对保持**文章正文最开头的「标题（如 '# 连载X - ...'）」和最后方的「引流部分（即结尾含有福利、联系方式、引导语等内容，通常由 '---' 分隔或在引用块中）」的**每个字都原封不动**，不允许做任何删改！如果用户纯粹是提问（比如'第四章讲了什么'），请在 chatResponse 中基于【原文参考资料】给出回答，并保持 newContent 为空或原样返回。"}`
             }]
           }
         ],
         config: {
           systemInstruction: `You are an expert editor assistant for a "Data Accountability System Construction" report serialization tool. 
-          Your goal is to help the editor refine the content based on their requests.
+          Your goal is to help the editor refine the content based on their requests, or answer questions based on the original report material.
           
-          When the user asks for a change:
-          1. Analyze the request.
-          2. Modify the markdown content accordingly.
+          When the user asks for a change or asks a question:
+          1. Analyze the request. Use the original report text if they ask about it.
+          2. Modify the markdown content accordingly if it is an editing request.
           3. Return a JSON response with two fields:
-             - "chatResponse": A brief, professional message to the editor explaining what you changed or providing suggestions. For suggestions, use plain text only.
-             - "newContent": The full, updated markdown content of the article. If no changes were needed or if only suggestions were requested, omit this field.
+             - "chatResponse": A brief, professional message to the editor explaining what you changed, providing suggestions, OR answering their question accurately based on the original report text. For suggestions, use plain text only.
+             - "newContent": The full, updated markdown content of the article. If no changes were needed or if only a question was asked without requesting edits, omit this field.
           
           Maintain the professional, pain-point-driven, and lead-generation-focused tone of the original serialization plan.`,
           responseMimeType: "application/json",
@@ -945,10 +1226,11 @@ export default function App() {
     }
   };
 
+  // Update callback refs whenever they change properly before other effects might use them
   useEffect(() => {
     updateContentRef.current = handleUpdateContent;
     saveVersionRef.current = saveVersion;
-  }, [handleUpdateContent, saveVersion]);
+  });
 
   const handleRollback = (msgIndex?: number) => {
     if (activeId === 'plan') {
@@ -995,12 +1277,25 @@ export default function App() {
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
+      // 宽松匹配表格行，匹配被管道符包围且不全是连续分隔符(-)，且第一列包含数字或中文字符的形式
+      const tableMatch = trimmed.match(/^\|\s*(?:连载|第)?\s*[0-9一二三四五六七八九十]+\s*(?:期|篇|讲)?\s*\|\s*[^|]+\s*\|\s*([^|]+)\s*\|/);
+      if (tableMatch && !trimmed.includes('---')) {
+        if (!inChapters || (inChapters && lines.indexOf(line) > lines.findIndex(l => l.includes('篇目') || l.includes('目录') || l.includes('列表')))) {
+          let titleCandidate = tableMatch[1].trim();
+          titleCandidate = titleCandidate.replace(/^(?:连载\s*[一二三四五六七八九十\d]+\s*[\-\:：\s]*)+/g, '');
+          newTitles.push(titleCandidate);
+          continue;
+        }
+      }
+
       const match = trimmed.match(/^(?:#+\s*)?\d+[\.\s、]+(.+)$/) || 
-                    trimmed.match(/^(?:#+\s*)?第[一二三四五六七八九十]+篇[:：\s]*(.+)$/);
+                    trimmed.match(/^(?:#+\s*)?第[一二三四五六七八九十]+[篇期][:：\s]*(.+)$/);
       
       if (match) {
         if (!inChapters || (inChapters && lines.indexOf(line) > lines.findIndex(l => l.includes('篇目') || l.includes('目录') || l.includes('列表')))) {
-          newTitles.push(match[1].trim());
+          let titleCandidate = match[1].trim();
+          titleCandidate = titleCandidate.replace(/^(?:连载\s*[一二三四五六七八九十\d]+\s*[\-\:：\s]*)+/g, '');
+          newTitles.push(titleCandidate);
         }
       }
     }
@@ -1019,7 +1314,11 @@ export default function App() {
     if (activeId === 'plan') {
       setSerialPlan(version.content);
       syncTitlesFromPlan(version.content);
-      if (editor) editor.commands.setContent(version.content);
+      if (editor) {
+        isUpdatingRef.current = true;
+        editor.commands.setContent(version.content);
+        setTimeout(() => { isUpdatingRef.current = false; }, 10);
+      }
     } else {
       setIssues(prev => prev.map(issue => {
         if (issue.id === activeId) {
@@ -1027,7 +1326,11 @@ export default function App() {
         }
         return issue;
       }));
-      if (editor) editor.commands.setContent(version.content);
+      if (editor) {
+        isUpdatingRef.current = true;
+        editor.commands.setContent(version.content);
+        setTimeout(() => { isUpdatingRef.current = false; }, 10);
+      }
     }
     setShowVersionMenu(false);
     showToast(`已切换至版本 V${version.version}`, 'success');
@@ -1052,7 +1355,10 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen bg-[#F5F5F0] text-[#141414] font-sans">
+    <div 
+      className="flex h-screen bg-[#F5F5F0] text-[#141414] font-sans"
+      onContextMenu={(e) => e.preventDefault()}
+    >
       {/* Sidebar */}
       <aside 
         style={{ width: sidebarWidth }}
@@ -1137,8 +1443,8 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
-          {serialPlan && (
+        {serialPlan && (
+          <div className="px-4 pb-2 border-b border-[#141414]/5 mb-2 shrink-0">
             <button
               onClick={() => setActiveId('plan')}
               className={`w-full group flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
@@ -1150,9 +1456,11 @@ export default function App() {
               <LayoutDashboard className="w-4 h-4" />
               <span className="text-sm font-bold truncate flex-1 text-left">连载规划</span>
             </button>
-          )}
+          </div>
+        )}
 
-          <div className="pt-4 pb-2 px-4">
+        <nav className="flex-1 px-4 space-y-1 overflow-y-auto min-h-0">
+          <div className="pt-2 pb-2 px-4">
             <p className="text-[10px] uppercase tracking-widest font-bold opacity-30">连载篇目</p>
           </div>
 
@@ -1170,13 +1478,15 @@ export default function App() {
                 0{issue.id}
               </span>
               <div className="flex-1 flex flex-col items-start min-w-0">
-                <span className="text-sm font-bold truncate w-full text-left">{issue.title}</span>
+                <span className="text-sm font-bold truncate w-full text-left">
+                  {cleanTitle(issue.title)}
+                </span>
                 <span className={`text-[9px] mt-0.5 ${activeId === issue.id ? 'text-white/60' : 'text-[#141414]/30'}`}>
                   {getWordCount(issue.content)} 字
                 </span>
               </div>
-              {issue.status === 'completed' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />}
-              {issue.status === 'draft' && <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />}
+              {issue.versions.length > 0 && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />}
+              {issue.versions.length === 0 && issue.content && <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />}
               {issue.status === 'pending' && <div className="w-3 h-3 rounded-full border-2 border-[#141414]/10" />}
             </button>
           ))}
@@ -1194,89 +1504,111 @@ export default function App() {
             </button>
           )}
           
-          {activeId === 'plan' && planApproved && (
-            <div className="grid grid-cols-2 gap-2 relative">
-              <div className="relative" ref={issueSelectorRef}>
-                <button 
-                  onClick={() => setShowIssueSelector(!showIssueSelector)}
-                  disabled={isGeneratingSingle || isGeneratingAll}
-                  className="w-full flex items-center justify-center gap-2 py-3 bg-[#141414] text-white rounded-full text-xs font-medium hover:bg-[#141414]/90 transition-colors disabled:opacity-50"
-                >
-                  {isGeneratingSingle ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                  生成一期
-                </button>
-                
-                <AnimatePresence>
-                  {showIssueSelector && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                      className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-[#141414]/10 rounded-2xl shadow-xl overflow-hidden z-[60]"
+          {planApproved && (
+            <div className={`grid gap-1 relative ${activeId === 'plan' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              {activeId === 'plan' ? (
+                <>
+                  <div className="relative" ref={issueSelectorRef}>
+                    <button 
+                      onClick={() => setShowIssueSelector(!showIssueSelector)}
+                      disabled={isGeneratingSingle || isGeneratingAll}
+                      className="w-full flex items-center justify-center gap-1 py-3 bg-[#141414] text-white rounded-xl text-[10px] font-bold hover:bg-[#141414]/90 transition-colors disabled:opacity-50"
                     >
-                      <div className="p-2 max-h-60 overflow-y-auto">
-                        {issues.map((issue) => (
-                          <button
-                            key={issue.id}
-                            onClick={() => generateIssue(issue.id)}
-                            className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-[#F5F5F0] transition-colors flex items-center justify-between group"
-                          >
-                            <span className="truncate mr-2">0{issue.id} {issue.title}</span>
-                            {issue.status !== 'pending' && <CheckCircle2 className="w-3 h-3 text-emerald-500" />}
-                          </button>
-                        ))}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
+                      {isGeneratingSingle ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      生成一期
+                    </button>
+                    
+                    <AnimatePresence>
+                      {showIssueSelector && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                          className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-[#141414]/10 rounded-2xl shadow-xl overflow-hidden z-[60]"
+                        >
+                          <div className="p-2 max-h-60 overflow-y-auto">
+                            {issues.map((issue) => (
+                              <button
+                                key={issue.id}
+                                onClick={() => generateIssue(issue.id)}
+                                className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-[#F5F5F0] transition-colors flex items-center justify-between group"
+                              >
+                                <span className="truncate mr-2">0{issue.id} {issue.title}</span>
+                                {issue.status !== 'pending' && <CheckCircle2 className="w-3 h-3 text-emerald-500" />}
+                              </button>
+                            ))}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
 
-              <div className="relative" ref={confirmAllRef}>
-                <button 
-                  onClick={() => setShowConfirmAll(!showConfirmAll)}
-                  disabled={isGeneratingSingle || isGeneratingAll}
-                  className="w-full flex items-center justify-center gap-2 py-3 border border-[#141414] text-[#141414] rounded-full text-xs font-medium hover:bg-gray-50 transition-colors disabled:opacity-50"
-                >
-                  {isGeneratingAll ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                  全部生成
-                </button>
-
-                <AnimatePresence>
-                  {showConfirmAll && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                      className="absolute bottom-full right-0 mb-2 w-56 bg-white border border-[#141414]/10 rounded-2xl shadow-xl p-4 z-[60]"
+                  <div className="relative" ref={confirmAllRef}>
+                    <button 
+                      onClick={() => setShowConfirmAll(!showConfirmAll)}
+                      disabled={isGeneratingSingle || isGeneratingAll}
+                      className="w-full flex items-center justify-center gap-1 py-3 border border-[#141414] text-[#141414] rounded-xl text-[10px] font-bold hover:bg-gray-50 transition-colors disabled:opacity-50"
                     >
-                      <div className="text-center">
-                        <AlertCircle className="w-5 h-5 text-amber-500 mx-auto mb-2" />
-                        <p className="text-[10px] text-[#141414]/60 leading-relaxed mb-3">
-                          确认全部生成？耗时约 2-3 分钟，系统将自动保存旧版本。
-                        </p>
-                        <div className="flex gap-2">
-                          <button 
-                            onClick={generateAll}
-                            className="flex-1 py-1.5 bg-[#141414] text-white rounded-full text-[10px] font-bold hover:bg-[#141414]/90 transition-colors"
-                          >
-                            确认
-                          </button>
-                          <button 
-                            onClick={() => setShowConfirmAll(false)}
-                            className="flex-1 py-1.5 border border-[#141414]/10 text-[#141414]/60 rounded-full text-[10px] font-bold hover:bg-gray-50 transition-colors"
-                          >
-                            取消
-                          </button>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
+                      {isGeneratingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                      全部生成
+                    </button>
+
+                    <AnimatePresence>
+                      {showConfirmAll && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                          className="absolute bottom-full right-0 mb-2 w-56 bg-white border border-[#141414]/10 rounded-2xl shadow-xl p-4 z-[60]"
+                        >
+                          <div className="text-center">
+                            <AlertCircle className="w-5 h-5 text-amber-500 mx-auto mb-2" />
+                            <p className="text-[10px] text-[#141414]/60 leading-relaxed mb-3">
+                              确认全部生成？耗时约 2-3 分钟，系统将自动保存旧版本。
+                            </p>
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={generateAll}
+                                className="flex-1 py-1.5 bg-[#141414] text-white rounded-full text-[10px] font-bold hover:bg-[#141414]/90 transition-colors"
+                              >
+                                确认
+                              </button>
+                              <button 
+                                onClick={() => setShowConfirmAll(false)}
+                                className="flex-1 py-1.5 border border-[#141414]/10 text-[#141414]/60 rounded-full text-[10px] font-bold hover:bg-gray-50 transition-colors"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                </>
+              ) : (
+                <div className="relative">
+                  <button 
+                    onClick={() => {
+                      if (activeIssue.content) {
+                        setRegenerateRequirements('');
+                        setShowRegenerateModal(true);
+                      } else {
+                        generateIssue(activeIssue.id);
+                      }
+                    }}
+                    disabled={isGeneratingSingle || isGeneratingAll}
+                    className={`w-full flex items-center justify-center gap-1 py-3 rounded-xl text-[10px] font-bold transition-colors disabled:opacity-50 ${activeIssue.content ? 'border border-[#141414] text-[#141414] hover:bg-gray-50' : 'bg-[#141414] text-white hover:bg-[#141414]/90 border-0'}`}
+                  >
+                    {isGeneratingSingle ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : activeIssue.content ? <RotateCcw className="w-3.5 h-3.5" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    {activeIssue.content ? '重新生成' : '生成本篇'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <div className="relative" ref={publishMenuRef}>
               <button 
                 onClick={() => setShowPublishMenu(!showPublishMenu)}
@@ -1322,6 +1654,20 @@ export default function App() {
                 )}
               </AnimatePresence>
             </div>
+
+            <div className="relative">
+              <input 
+                type="file" 
+                accept=".zip" 
+                onChange={handleLoadProject}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-[60]"
+                title="加载已保存的项目文档"
+              />
+              <div className="w-full flex flex-col items-center justify-center gap-1.5 py-3 bg-[#F5F5F0] text-[#141414]/70 rounded-2xl text-[10px] font-bold hover:bg-[#E4E3E0] transition-all border border-[#141414]/5 cursor-pointer pointer-events-none">
+                <FolderArchive className="w-3.5 h-3.5" />
+                <span>加载文档</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1339,7 +1685,7 @@ export default function App() {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 text-sm font-medium text-[#141414]/60">
               <FileText className="w-4 h-4" />
-              <span>{activeIssue.title}</span>
+              <span>{activeId === 'plan' ? activeIssue.title : cleanTitle(activeIssue.title)}</span>
               {activeIssue.versions && activeIssue.versions.length > 0 && (
                 <div className="relative" ref={versionMenuRef}>
                   <button 
@@ -1386,6 +1732,24 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-3 ml-4">
+              {activeId === 'plan' && (
+                <button
+                  onClick={() => {
+                    const match = activeIssue.content.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/);
+                    if (match && match[1].trim()) {
+                      setCtaTemplate(match[1].trim());
+                      showToast("引流模板已提取并全局锁定", "success");
+                    } else {
+                      showToast("未找到内容，请确认在 '## 3. 引流模板' 的下方是否有内容", "error");
+                    }
+                  }}
+                  className={`flex items-center gap-1.5 px-3 py-1 bg-white border rounded-full text-[10px] font-bold transition-all shadow-sm ${ctaTemplate.trim().length > 0 ? 'border-emerald-200 text-emerald-600' : 'border-[#141414]/10 text-[#141414]/60 hover:bg-[#F5F5F0]'}`}
+                  title="提取当前大纲中的引流模板并锁定为全局参数"
+                >
+                  {ctaTemplate.trim().length > 0 ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                  {ctaTemplate.trim().length > 0 ? '引流已锁定' : '提取引流模板'}
+                </button>
+              )}
               <motion.button 
                 onClick={saveVersion}
                 animate={isDirty ? { 
@@ -1526,22 +1890,6 @@ export default function App() {
                             {getWordCount(activeIssue.content)} 字
                           </span>
                         </div>
-                        
-                        <button 
-                          onClick={() => {
-                            if (activeIssue.content) {
-                              setRegenerateRequirements('');
-                              setShowRegenerateModal(true);
-                            } else {
-                              generateIssue(activeIssue.id);
-                            }
-                          }}
-                          disabled={isGeneratingSingle || isGeneratingAll}
-                          className="flex items-center gap-2 px-4 py-2 bg-[#5A5A40] text-white rounded-xl text-xs font-bold hover:bg-[#5A5A40]/90 transition-all disabled:opacity-50"
-                        >
-                          {isGeneratingSingle ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                          {activeIssue.content ? '再生成本篇' : '生成本篇内容'}
-                        </button>
                       </div>
                     )}
                     
@@ -1552,7 +1900,7 @@ export default function App() {
                         </div>
                         <h4 className="text-lg font-bold mb-2">本篇内容尚未生成</h4>
                         <p className="text-sm text-[#141414]/40 max-w-xs mb-8">
-                          点击上方按钮，AI 将根据规划大纲、公司业务及前序内容，为您撰写本篇的初稿。
+                          点击左边栏下方的按钮，AI 将根据规划大纲、公司业务及前序内容，为您撰写本篇的初稿。
                         </p>
                       </div>
                     ) : (
@@ -1580,6 +1928,7 @@ export default function App() {
             <AnimatePresence>
               {isChatOpen && (
                 <motion.aside
+                  key="ai-assistant-panel"
                   initial={{ x: chatPanelWidth }}
                   animate={{ x: 0 }}
                   exit={{ x: chatPanelWidth }}
@@ -1820,7 +2169,22 @@ export default function App() {
                       if (uploadError) setUploadError(null);
                     }}
                     placeholder="例如：我们是一家专注企业数字化转期的咨询公司，核心产品是数据治理平台..."
-                    className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-2xl text-sm focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[200px] transition-all"
+                    className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-2xl text-sm focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[120px] transition-all"
+                  />
+                </section>
+
+                <section>
+                  <div className="flex items-center gap-2 mb-3">
+                    <label className="text-[10px] uppercase tracking-widest font-bold text-[#141414]/40">默认引流模板 (可选)</label>
+                    <div title={ctaTemplate.trim().length > 0 ? "已锁定全局引流模板" : "当填写内容时即为锁定模式"}>
+                      {ctaTemplate.trim().length > 0 ? <Lock className="w-3 h-3 text-emerald-600" /> : <Unlock className="w-3 h-3 text-[#141414]/20" />}
+                    </div>
+                  </div>
+                  <textarea 
+                    value={ctaTemplate}
+                    onChange={(e) => setCtaTemplate(e.target.value)}
+                    placeholder="输入将在每篇文章结尾统一追加的模板（留空则根据报告自动生成）。在连载大纲页亦可一键提取锁定。"
+                    className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-2xl text-sm md:font-mono focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[140px] transition-all"
                   />
                 </section>
               </div>
@@ -1973,7 +2337,7 @@ export default function App() {
                     <RotateCcw className="w-5 h-5 text-[#5A5A40]" />
                   </div>
                   <div>
-                    <h3 className="text-lg font-bold">再生成本篇</h3>
+                    <h3 className="text-lg font-bold">重新生成</h3>
                     <p className="text-[10px] text-[#141414]/40 uppercase tracking-widest font-bold">REGENERATE CHAPTER</p>
                   </div>
                 </div>
@@ -2021,6 +2385,67 @@ export default function App() {
                 >
                   {isGeneratingSingle ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
                   确认并再生成
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showSaveModal && savedZipPath && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-[#141414]/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-[#141414]/5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-[#5A5A40]/10 rounded-xl flex items-center justify-center">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold">保存成功</h3>
+                  </div>
+                </div>
+                <button onClick={() => setShowSaveModal(false)} className="p-2 hover:bg-[#141414]/5 rounded-full transition-colors">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4 text-center">
+                <div className="w-full truncate text-xs text-[#141414]/60 bg-[#F5F5F0] rounded-xl p-3 border border-[#141414]/10" title={savedZipPath}>
+                  {savedZipPath}
+                </div>
+              </div>
+
+              <div className="p-6 bg-[#F5F5F0]/30 border-t border-[#141414]/5 flex justify-end gap-3">
+                <button 
+                  onClick={() => setShowSaveModal(false)}
+                  className="px-6 py-2 border border-[#141414]/10 rounded-xl text-xs font-bold hover:bg-gray-50 transition-all flex-1"
+                >
+                  关闭
+                </button>
+                <button 
+                  onClick={async () => {
+                    try {
+                      await fetch('/api/open-folder', {
+                        method: 'POST',
+                        body: JSON.stringify({ targetPath: savedZipPath })
+                      });
+                    } catch (e) {}
+                    setShowSaveModal(false);
+                  }}
+                  className="px-6 py-2 bg-[#5A5A40] text-white rounded-xl text-xs font-bold hover:bg-[#5A5A40]/90 transition-all flex-1"
+                >
+                  打开所在位置
                 </button>
               </div>
             </motion.div>
