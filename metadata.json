@@ -1,0 +1,5 @@
+{
+  "name": "AI-Report-Serialization-Pro",
+  "description": "用于分解长篇报告并生成公众号连载内容的编辑器，支持Markdown实时预览和修改。",
+  "requestFramePermissions": []
+}
