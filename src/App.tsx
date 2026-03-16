@@ -58,6 +58,15 @@ import { Table } from '@tiptap/extension-table';
 import { TableRow } from '@tiptap/extension-table-row';
 import { TableCell } from '@tiptap/extension-table-cell';
 import { TableHeader } from '@tiptap/extension-table-header';
+import Highlight from '@tiptap/extension-highlight';
+import {
+  generatePlanPrompt,
+  generateApprovePlanPrompt,
+  generateArticlePrompt,
+  generateChatPrompt,
+  generateFloatingEditPrompt,
+  CHAT_SYSTEM_INSTRUCTION
+} from './prompts';
 
 // Set worker for pdfjs
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -120,13 +129,11 @@ const cleanTitle = (rawTitle: string) => {
   text = text.replace(/#/g, '');
   text = text.replace(/《[^》]+》[\s\-\:]*/g, '');
   
-  const match = text.match(/[-—]\s*([^:：!！\?？,，]+)/);
-  if (match) {
-    return match[1].trim();
-  }
+  // 保底：去掉可能残留的连载前缀
+  text = text.replace(/^(?:连载|第)\s*[一二三四五六七八九十\d]+\s*(?:期|篇|讲|章)?[\-\:：\s]*/g, '');
   
-  text = text.replace(/^(?:连载\s*[一二三四五六七八九十\d]+\s*[\-\:：\s]*)+/g, '');
-  text = text.split(/[-—:：!！\?？,，|]/)[0].trim();
+  // 只以破折号、波浪号作为主副标题的分隔符，保留主标题结尾的感叹号问号等
+  text = text.split(/[-—~|]/)[0].trim();
   return text;
 };
 
@@ -179,6 +186,11 @@ export default function App() {
       Placeholder.configure({
         placeholder: '在此输入内容...',
       }),
+      Highlight.configure({
+        HTMLAttributes: {
+          class: 'bg-[#5A5A40]/30 text-inherit',
+        }
+      }),
     ],
     content: '',
     onUpdate: ({ editor }) => {
@@ -207,6 +219,7 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   const [companyBusiness, setCompanyBusiness] = useState('');
   const [reportPurpose, setReportPurpose] = useState('');
+  const [currentHotspot, setCurrentHotspot] = useState('');
   const [selectedTone, setSelectedTone] = useState(TONE_OPTIONS[0].id);
   const [showStrategyModal, setShowStrategyModal] = useState(false);
   const [reportText, setReportText] = useState('');
@@ -220,10 +233,25 @@ export default function App() {
   const [serialPlan, setSerialPlan] = useState<string>(DEFAULT_SERIAL_PLAN);
   const [planVersions, setPlanVersions] = useState<Version[]>([]);
   const [ctaTemplate, setCtaTemplate] = useState('');
+  const [episodeMode, setEpisodeMode] = useState<'auto' | 'fixed'>('auto');
+  const [episodeCount, setEpisodeCount] = useState<number>(5);
+  const [ctaMode, setCtaMode] = useState<'none' | 'generate' | 'exact'>('exact');
+  const [exactCtaTemplate, setExactCtaTemplate] = useState('');
+  const [generateCtaTemplate, setGenerateCtaTemplate] = useState('');
   const [isStateLoaded, setIsStateLoaded] = useState(false);
+  const [globalSkills, setGlobalSkills] = useState<{humanizer: string, writingStyle: string}>({ humanizer: '', writingStyle: '' });
 
-  // Load state on mount
+  // Load state and global skills on mount
   useEffect(() => {
+    fetch('/api/skills')
+      .then(res => res.json())
+      .then(data => {
+        if (data.humanizer || data.writingStyle) {
+          setGlobalSkills(data);
+        }
+      })
+      .catch(err => console.error("Failed to load skills:", err));
+
     fetch('/api/load-state')
       .then(res => {
         if (!res.ok) throw new Error('No state');
@@ -236,6 +264,7 @@ export default function App() {
           if (data.chatMessages) setChatMessages(data.chatMessages);
           if (data.companyBusiness) setCompanyBusiness(data.companyBusiness);
           if (data.reportPurpose) setReportPurpose(data.reportPurpose);
+          if (data.currentHotspot) setCurrentHotspot(data.currentHotspot);
           if (data.selectedTone) setSelectedTone(data.selectedTone);
           if (data.reportText) setReportText(data.reportText);
           if (data.reportSummary) setReportSummary(data.reportSummary);
@@ -244,7 +273,19 @@ export default function App() {
           if (data.planApproved !== undefined) setPlanApproved(data.planApproved);
           if (data.serialPlan) setSerialPlan(data.serialPlan);
           if (data.planVersions) setPlanVersions(data.planVersions);
-          if (data.ctaTemplate) setCtaTemplate(data.ctaTemplate);
+          if (data.exactCtaTemplate !== undefined) setExactCtaTemplate(data.exactCtaTemplate);
+          if (data.generateCtaTemplate !== undefined) setGenerateCtaTemplate(data.generateCtaTemplate);
+          // Fallback map
+          if (data.ctaTemplate !== undefined) {
+             if (data.ctaMode === 'generate') {
+                setGenerateCtaTemplate(data.ctaTemplate);
+             } else {
+                setExactCtaTemplate(data.ctaTemplate);
+             }
+          }
+          if (data.episodeMode) setEpisodeMode(data.episodeMode);
+          if (data.episodeCount) setEpisodeCount(data.episodeCount);
+          if (data.ctaMode) setCtaMode(data.ctaMode);
         }
         setIsStateLoaded(true);
       })
@@ -266,6 +307,7 @@ export default function App() {
         chatMessages,
         companyBusiness,
         reportPurpose,
+        currentHotspot,
         selectedTone,
         reportText,
         reportSummary,
@@ -274,7 +316,11 @@ export default function App() {
         planApproved,
         serialPlan,
         planVersions,
-        ctaTemplate
+        exactCtaTemplate,
+        generateCtaTemplate,
+        episodeMode,
+        episodeCount,
+        ctaMode
       };
       fetch('/api/save-state', {
         method: 'POST',
@@ -286,8 +332,8 @@ export default function App() {
     return () => clearTimeout(handler);
   }, [
     isStateLoaded, issues, activeId, chatMessages, companyBusiness, reportPurpose,
-    selectedTone, reportText, reportSummary, fileName, isPlanGenerated,
-    planApproved, serialPlan, planVersions, ctaTemplate
+    currentHotspot, selectedTone, reportText, reportSummary, fileName, isPlanGenerated,
+    planApproved, serialPlan, planVersions, exactCtaTemplate, generateCtaTemplate, episodeMode, episodeCount, ctaMode
   ]);
   
   // Resizable Sidebars State
@@ -532,6 +578,7 @@ export default function App() {
         if (data.chatMessages) setChatMessages(data.chatMessages);
         if (data.companyBusiness) setCompanyBusiness(data.companyBusiness);
         if (data.reportPurpose) setReportPurpose(data.reportPurpose);
+        if (data.currentHotspot) setCurrentHotspot(data.currentHotspot);
         if (data.selectedTone) setSelectedTone(data.selectedTone);
         if (data.reportText) setReportText(data.reportText);
         if (data.reportSummary) setReportSummary(data.reportSummary);
@@ -540,7 +587,19 @@ export default function App() {
         if (data.planApproved !== undefined) setPlanApproved(data.planApproved);
         if (data.serialPlan) setSerialPlan(data.serialPlan);
         if (data.planVersions) setPlanVersions(data.planVersions);
-        if (data.ctaTemplate) setCtaTemplate(data.ctaTemplate);
+        if (data.exactCtaTemplate !== undefined) setExactCtaTemplate(data.exactCtaTemplate);
+        if (data.generateCtaTemplate !== undefined) setGenerateCtaTemplate(data.generateCtaTemplate);
+        // Fallback map
+        if (data.ctaTemplate !== undefined) {
+           if (data.ctaMode === 'generate') {
+              setGenerateCtaTemplate(data.ctaTemplate);
+           } else {
+              setExactCtaTemplate(data.ctaTemplate);
+           }
+        }
+        if (data.episodeMode) setEpisodeMode(data.episodeMode);
+        if (data.episodeCount) setEpisodeCount(data.episodeCount);
+        if (data.ctaMode) setCtaMode(data.ctaMode);
         showToast("项目包已成功加载，恢复进度", "success");
       } else {
         showToast("压缩包中找不到项目状态文件", "error");
@@ -575,35 +634,18 @@ export default function App() {
       // Step 1: Generate Plan and extract business info if missing
       const planResponse = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
-        contents: `你是一个资深的公众号编辑。请根据以下报告全文内容，先进行提炼总结，然后规划一个连载系列任务。
-        报告内容摘要：${text.substring(0, 500000)}
-        
-        ${companyBusiness ? `公司背景：${companyBusiness}` : ''}
-        ${reportPurpose ? `分解目的与要求：${reportPurpose}` : ''}
-        ${selectedTone ? `整体调性：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}` : ''}
-        ${ctaTemplate ? `【强制引流内容（请原样输出，不要修改分毫）】：\n${ctaTemplate}` : ''}
-        
-        请输出一个 JSON 格式的对象，包含：
-        1. businessName: 从报告中识别的公司名称或业务方向
-        2. reportSummary: 万字以内的详细报告全文提炼总结（包含各章节核心要点）
-        3. plan: Markdown 格式的连载规划。必须严格包含以下三个部分，且风格专业、犀利：
-           ## 1. 策划思路
-           - **核心目标**：(例如：通过连载建立专业形象，吸引精准 B 端客户)
-           - **调性定位**：(例如：专业、前瞻、实战、犀利)
-           - **引流技巧**：(例如：抛出行业痛点问题，在关键处留白引导咨询)
-           
-           ## 2. 连载目录规划
-           请根据实际内容提取的总结决定是一章分多期，还是多章并一期。使用 Markdown 表格形式，包含以下列：
-           | 期数 | 主题方向 | 篇目标题 | 对应报告章节 |
-           | :--- | :--- | :--- | :--- |
-           (至少 6-8 期)
-           
-           ## 3. 引流模板
-           ${ctaTemplate ? '严格使用前文提供的【强制引流内容】，并原样输出作为第3部分，不允许更改任何一个字。' : '使用 Markdown 引用块 (>) 格式，包含【福利预告】、报告简介、引导语及关键词回复建议。'}
-           
-        4. chapters: JSON数组（与目录规划一致），每篇包含 id, title (格式必须为：连载X - 篇目标题，如"连载1 - 制度写在纸上，业务跑在圈外"), outline (结合报告各章节内容列举大致提纲)。
-        
-        请严格按照 JSON 格式输出。`,
+        contents: generatePlanPrompt({
+          text,
+          companyBusiness,
+          reportPurpose,
+          currentHotspot,
+          selectedTone,
+          ctaTemplate: ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate,
+          toneLabel: TONE_OPTIONS.find(t => t.id === selectedTone)?.label || '',
+          episodeMode,
+          episodeCount,
+          globalSkills
+        }),
         config: { responseMimeType: "application/json", temperature: 0.2 }
       });
 
@@ -725,24 +767,32 @@ export default function App() {
     }
   };
 
+  // Keep tiptap event refs updated with the latest closure
+  useEffect(() => {
+    updateContentRef.current = (newContent: string) => {
+      setIsDirty(true);
+      if (activeId === 'plan') {
+        setSerialPlan(newContent);
+      } else {
+        setIssues(prev => prev.map(issue => 
+          issue.id === activeId ? { ...issue, content: newContent } : issue
+        ));
+      }
+    };
+    saveVersionRef.current = saveVersion;
+  });
+
+
   const approvePlan = async () => {
     if (!serialPlan.trim()) return;
     setIsPlanLoading(true);
     try {
       const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
-        contents: `根据以下连载规划，生成各篇目的大纲，并撰写第一篇的完整内容任务。
-        规划内容：${serialPlan}
-        调性要求：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}
-        
-        请以JSON格式返回，结构如下：
-        {
-          "chapters": [
-            { "id": 1, "title": "连载1 - 篇目小标题", "outline": "大纲内容", "content": "第一篇的完整Markdown内容", "status": "draft", "versions": [{ "version": "1.0", "content": "第一篇的完整Markdown内容", "timestamp": 123456789 }] },
-            { "id": 2, "title": "连载2 - 篇目小标题", "outline": "大纲内容", "content": "", "status": "pending", "versions": [] },
-            ...
-          ]
-        }`,
+        contents: generateApprovePlanPrompt({
+          serialPlan,
+          toneLabel: TONE_OPTIONS.find(t => t.id === selectedTone)?.label || ''
+        }),
         config: { responseMimeType: "application/json", temperature: 0.2 }
       });
       const data = JSON.parse(response.text || '{}');
@@ -777,37 +827,34 @@ export default function App() {
       const prevChapters = issues.filter(i => i.id < id && i.content).map(i => i.content).join('\n\n');
       const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
-        contents: `你正在撰写一个连载系列。
-        公司业务：${companyBusiness}
-        调性：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}
-        
-        【全篇提炼总结】
-        ${reportSummary.substring(0, 10000)}
-        
-        【原文完整资料 caching】
-        （请根据大纲需要，从以下完整报告中智能调取所需细节及章节，作为素材基础）
-        ${reportText.substring(0, 500000)}
-        
-        前序内容回顾：${prevChapters.substring(0, 3000)}
-        当前篇目大纲：${chapter.outline}
-        ${extraRequirements ? `用户额外要求：${extraRequirements}` : ''}
-        
-        【核心写作约束 (Hard Constraints)】
-        1. **去除AI味**：绝对不得使用“综上所述”、“总而言之”、“在这个瞬息万变的时代”、“不可否认”、“意味着”、“至关重要”、“见证”、“不可或缺”、“深入探讨”等八股文过渡词。
-        2. **说人话/口语化**：语气必须亲切、清晰、直观。使用短平快的断句，打断又长又臭的从句翻译腔（如“不仅是…更是…”）。避免空泛抽象的词汇，坚决拒绝“AI味”的说教风格。
-        3. **拒绝浮夸与俚语滥用**：禁用以下网梗及假大空黑话：赋能、闭环、抓手、卷上天、手搓、秒成渣、彻底重塑、爆发式等。用正常的行业词汇（如“支持/流程/切入点”）取而代之。
-        4. **读者视角 (Humanizer)**：少讲大道理，多讲具体的业务场景和真实案例。像人一样面对面讲业务，具备情绪价值和启发性。主张“言之有物，不讲废话”。
-        
-        请强执行以上约束，并基于原始报告内容，撰写本篇（${chapter.title}）的完整Markdown内容。`,
+        contents: generateArticlePrompt({
+          companyBusiness,
+          toneLabel: TONE_OPTIONS.find(t => t.id === selectedTone)?.label || '',
+          reportSummary,
+          reportText,
+          prevChapters,
+          chapterTitle: chapter.title,
+          chapterOutline: chapter.outline,
+          extraRequirements,
+          ctaMode,
+          ctaTemplate: ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate,
+          globalSkills
+        }),
         config: { temperature: 0.3 }
       });
       
       let newContent = response.text || '';
       
-      // Extract and append CTA template from config or serialPlan
-      const appliedCta = ctaTemplate.trim() || (serialPlan.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/)?.[1] || '').trim();
-      if (appliedCta && !newContent.includes(appliedCta)) {
-        newContent += '\n\n---\n\n' + appliedCta;
+      // If ctaMode is 'exact', append the CTA template exactly as is
+      if (ctaMode === 'exact') {
+        const appliedCta = exactCtaTemplate.trim() || (serialPlan.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/)?.[1] || '').trim();
+        if (appliedCta) {
+          const strippedContent = newContent.replace(/\s/g, '');
+          const strippedCta = appliedCta.replace(/\s/g, '');
+          if (!strippedContent.includes(strippedCta)) {
+            newContent += '\n\n---\n\n' + appliedCta;
+          }
+        }
       }
 
       setIssues(prev => prev.map(i => {
@@ -859,36 +906,32 @@ export default function App() {
           
         const response = await ai.models.generateContent({
           model: "gemini-3.1-pro-preview",
-          contents: `你正在撰写一个连载系列。
-          公司业务：${companyBusiness}
-          调性：${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}
-          
-          【全篇提炼总结】
-          ${reportSummary.substring(0, 10000)}
-          
-          【原文完整资料 caching】
-          （请根据大纲需要，从以下完整报告中智能调取所需细节及章节，作为素材基础）
-          ${reportText.substring(0, 500000)}
-          
-          前序内容回顾：${prevChapters.substring(0, 3000)}
-          当前篇目大纲：${chapter.outline}
-          
-          【核心写作约束 (Hard Constraints)】
-          1. **去除AI味**：绝对不得使用“综上所述”、“总而言之”、“在这个瞬息万变的时代”、“不可否认”、“意味着”、“至关重要”、“见证”、“不可或缺”、“深入探讨”等八股文过渡词。
-          2. **说人话/口语化**：语气必须亲切、清晰、直观。使用短平快的断句，打断又长又臭的从句翻译腔（如“不仅是…更是…”）。避免空泛抽象的词汇，坚决拒绝“AI味”的说教风格。
-          3. **拒绝浮夸与俚语滥用**：禁用以下网梗及假大空黑话：赋能、闭环、抓手、卷上天、手搓、秒成渣、彻底重塑、爆发式等。用正常的行业词汇（如“支持/流程/切入点”）取而代之。
-          4. **读者视角 (Humanizer)**：少讲大道理，多讲具体的业务场景和真实案例。像人一样面对面讲业务，具备情绪价值和启发性。主张“言之有物，不讲废话”。
-          
-          请强执行以上约束，并基于原始报告内容，撰写本篇（${chapter.title}）的完整Markdown内容。`,
+          contents: generateArticlePrompt({
+            companyBusiness,
+            toneLabel: TONE_OPTIONS.find(t => t.id === selectedTone)?.label || '',
+            reportSummary,
+            reportText,
+            prevChapters,
+            chapterTitle: chapter.title,
+            chapterOutline: chapter.outline,
+            ctaMode,
+            ctaTemplate: ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate
+          }),
           config: { temperature: 0.3 }
         });
         
         let newContent = response.text || '';
         
-        // Extract and append CTA template from config or serialPlan
-        const appliedCta = ctaTemplate.trim() || (serialPlan.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/)?.[1] || '').trim();
-        if (appliedCta && !newContent.includes(appliedCta)) {
-          newContent += '\n\n---\n\n' + appliedCta;
+        // If ctaMode is 'exact', append the CTA template exactly as is
+        if (ctaMode === 'exact') {
+          const appliedCta = exactCtaTemplate.trim() || (serialPlan.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/)?.[1] || '').trim();
+          if (appliedCta) {
+            const strippedContent = newContent.replace(/\s/g, '');
+            const strippedCta = appliedCta.replace(/\s/g, '');
+            if (!strippedContent.includes(strippedCta)) {
+              newContent += '\n\n---\n\n' + appliedCta;
+            }
+          }
         }
 
         currentIssues = currentIssues.map(i => {
@@ -926,14 +969,26 @@ export default function App() {
         showToast("内容为空，无法保存");
         return;
       }
-      const element = document.createElement("a");
-      const file = new Blob([activeIssue.content], {type: 'text/markdown'});
-      element.href = URL.createObjectURL(file);
-      element.download = `${activeIssue.title}.md`;
-      document.body.appendChild(element);
-      element.click();
-      document.body.removeChild(element);
-      showToast(`已保存：${activeIssue.title}`, 'success');
+      try {
+        const response = await fetch('/api/save-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: `${activeIssue.title}.md`,
+            content: activeIssue.content
+          })
+        });
+        const result = await response.json();
+        if (result.path) {
+          setSavedZipPath(result.path);
+          setShowSaveModal(true);
+        } else {
+          showToast(`本地保存接口失败，请检查运行环境`, 'error');
+        }
+      } catch (err) {
+        console.error('Save file error:', err);
+        showToast(`本地保存接口失败：${err}`, 'error');
+      }
     } else {
       const contentIssues = issues.filter(i => i.content && i.content.trim() !== '');
       if (contentIssues.length === 0 && !isSilent) {
@@ -976,7 +1031,12 @@ export default function App() {
         isPlanGenerated,
         planApproved,
         serialPlan,
-        planVersions
+        planVersions,
+        exactCtaTemplate,
+        generateCtaTemplate,
+        episodeMode,
+        episodeCount,
+        ctaMode
       };
       zip.file(`.app_state.json`, JSON.stringify(state));
 
@@ -998,22 +1058,11 @@ export default function App() {
             setShowSaveModal(true);
           }
         } else {
-          const element = document.createElement("a");
-          element.href = URL.createObjectURL(blob);
-          element.download = `连载系列_全部篇目.zip`;
-          document.body.appendChild(element);
-          element.click();
-          document.body.removeChild(element);
-          showToast(`已下载全部篇目`, 'success');
+          showToast(`离线保存接口异常`, 'error');
         }
       } catch (err) {
-        const element = document.createElement("a");
-        element.href = URL.createObjectURL(blob);
-        element.download = `连载系列_全部篇目.zip`;
-        document.body.appendChild(element);
-        element.click();
-        document.body.removeChild(element);
-        showToast(`已下载全部篇目`, 'success');
+        console.error('Save failed entirely:', err);
+        showToast(`离线保存接口异常：${err}`, 'error');
       }
     }
     setShowDownloadMenu(false);
@@ -1032,36 +1081,45 @@ export default function App() {
     const selectedText = editor.state.doc.textBetween(from, to, ' ');
 
     if (selectedText.trim()) {
+      // Mark text as highlighted so it remains visually selected when focus is lost
+      editor.chain().setTextSelection({ from, to }).setHighlight().run();
+      
       setSelectionInfo({ text: selectedText, start: from, end: to });
       setFloatingMenu({ visible: true, x: e.clientX, y: e.clientY });
     }
   };
 
   const handleFloatingEdit = async () => {
-    if (!selectionInfo || !floatingPrompt.trim() || isFloatingLoading) return;
+    if (!selectionInfo || !floatingPrompt.trim() || isFloatingLoading || !editor) return;
 
     setIsFloatingLoading(true);
+    setFloatingMenu({ ...floatingMenu, visible: false });
+    
     try {
+      // Push the user instruction to the chat area immediately
+      const userMessage = `针对选中文本：\n> ${selectionInfo.text}\n\n执行要求：${floatingPrompt}`;
+      const newChatMessages = [...chatMessages, { role: 'user' as const, content: userMessage }];
+      setChatMessages(newChatMessages);
+
       const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
-        contents: `你是一个专业的文案编辑。请根据用户的要求修改选中的文本。
-        
-        选中的文本：
-        ${selectionInfo.text}
-        
-        修改要求：
-        ${floatingPrompt}
-        
-        请仅返回修改后的文本内容，不要包含任何解释或Markdown代码块标记。`,
+        contents: generateFloatingEditPrompt({
+          selectionText: selectionInfo.text,
+          prompt: floatingPrompt
+        }),
       });
 
       const newText = response.text || '';
       
-      if (editor) {
-        editor.chain().focus().insertContentAt({ from: selectionInfo.start, to: selectionInfo.end }, newText).run();
-      }
+      // Update the editor: replace text AND remove the highlight mark
+      editor.chain().focus().insertContentAt({ from: selectionInfo.start, to: selectionInfo.end }, newText).unsetHighlight().run();
 
-      setFloatingMenu({ ...floatingMenu, visible: false });
+      // Push the AI response to the chat area
+      setChatMessages([...newChatMessages, { 
+        role: 'assistant' as const, 
+        content: `这是修改后的内容：\n\n${newText}\n\n*（已自动应用到左侧编辑器）*` 
+      }]);
+
       setFloatingPrompt("");
       setSelectionInfo(null);
     } catch (error) {
@@ -1121,37 +1179,19 @@ export default function App() {
           {
             role: "user",
             parts: [{
-              text: `你是一个专业的文案编辑助手。请根据用户的要求修改、建议当前文章，或回答关于源报告的问题。
-        
-        【全篇提炼总结】
-        ${reportSummary.length > 0 ? reportSummary.substring(0, 10000) : '未提供'}
-
-        【原文参考资料】
-        (此处为长文本缓存，包含了文章所需的全部基础信息，如果用户提问原报告相关内容，请直接从中查找准确回答，不要胡编乱造)
-        ${reportText.length > 0 ? reportText.substring(0, 500000) : '未提供'}
-        
-        【当前文章内容】
-        ${activeIssue.content}
-        
-        【用户要求】
-        ${userMessage}
-        
-        ${isSuggestionOnly ? "请仅提供具体的改进建议点。如果用户提问关于原报告的问题（比如'第四章讲了什么'），请基于【原文参考资料】给出详细回答。请务必使用纯文本格式，不要使用 Markdown 标记（如 #, *, - 等）。" : "如果用户要求修改内容，请直接返回修改后的全文 Markdown。\n\n【极度重要】：在进行任何长度、语气或其他文章内容的修改润色时，你必须**绝对保持**文章正文最开头的「标题（如 '# 连载X - ...'）」和最后方的「引流部分（即结尾含有福利、联系方式、引导语等内容，通常由 '---' 分隔或在引用块中）」的**每个字都原封不动**，不允许做任何删改！如果用户纯粹是提问（比如'第四章讲了什么'），请在 chatResponse 中基于【原文参考资料】给出回答，并保持 newContent 为空或原样返回。"}`
+              text: generateChatPrompt({
+                reportSummary,
+                reportText,
+                activeContent: activeIssue.content,
+                userMessage,
+                isSuggestionOnly,
+                globalSkills
+              })
             }]
           }
         ],
         config: {
-          systemInstruction: `You are an expert editor assistant for a "Data Accountability System Construction" report serialization tool. 
-          Your goal is to help the editor refine the content based on their requests, or answer questions based on the original report material.
-          
-          When the user asks for a change or asks a question:
-          1. Analyze the request. Use the original report text if they ask about it.
-          2. Modify the markdown content accordingly if it is an editing request.
-          3. Return a JSON response with two fields:
-             - "chatResponse": A brief, professional message to the editor explaining what you changed, providing suggestions, OR answering their question accurately based on the original report text. For suggestions, use plain text only.
-             - "newContent": The full, updated markdown content of the article. If no changes were needed or if only a question was asked without requesting edits, omit this field.
-          
-          Maintain the professional, pain-point-driven, and lead-generation-focused tone of the original serialization plan.`,
+          systemInstruction: CHAT_SYSTEM_INSTRUCTION,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -1396,7 +1436,7 @@ export default function App() {
                 </div>
               </Tooltip>
 
-              <Tooltip text="生成策略与调性" className="w-full">
+              <Tooltip text="生成策略" className="w-full">
                 <button 
                   onClick={() => {
                     setShowStrategyModal(true);
@@ -1474,8 +1514,8 @@ export default function App() {
                   : 'text-[#141414]/60 hover:bg-[#141414]/5'
               }`}
             >
-              <span className={`text-xs font-mono opacity-50 ${activeId === issue.id ? 'text-white' : ''}`}>
-                0{issue.id}
+              <span className={`text-[11px] font-bold ${activeId === issue.id ? 'text-white' : 'text-[#141414]/60'}`}>
+                连载{issue.id}
               </span>
               <div className="flex-1 flex flex-col items-start min-w-0">
                 <span className="text-sm font-bold truncate w-full text-left">
@@ -1533,7 +1573,7 @@ export default function App() {
                                 onClick={() => generateIssue(issue.id)}
                                 className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-[#F5F5F0] transition-colors flex items-center justify-between group"
                               >
-                                <span className="truncate mr-2">0{issue.id} {issue.title}</span>
+                                <span className="truncate mr-2">连载{issue.id} - {cleanTitle(issue.title)}</span>
                                 {issue.status !== 'pending' && <CheckCircle2 className="w-3 h-3 text-emerald-500" />}
                               </button>
                             ))}
@@ -1732,24 +1772,34 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-3 ml-4">
-              {activeId === 'plan' && (
-                <button
-                  onClick={() => {
-                    const match = activeIssue.content.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/);
-                    if (match && match[1].trim()) {
-                      setCtaTemplate(match[1].trim());
-                      showToast("引流模板已提取并全局锁定", "success");
-                    } else {
-                      showToast("未找到内容，请确认在 '## 3. 引流模板' 的下方是否有内容", "error");
-                    }
-                  }}
-                  className={`flex items-center gap-1.5 px-3 py-1 bg-white border rounded-full text-[10px] font-bold transition-all shadow-sm ${ctaTemplate.trim().length > 0 ? 'border-emerald-200 text-emerald-600' : 'border-[#141414]/10 text-[#141414]/60 hover:bg-[#F5F5F0]'}`}
-                  title="提取当前大纲中的引流模板并锁定为全局参数"
-                >
-                  {ctaTemplate.trim().length > 0 ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-                  {ctaTemplate.trim().length > 0 ? '引流已锁定' : '提取引流模板'}
-                </button>
-              )}
+              {activeId === 'plan' && (() => {
+                const globalCta = (ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate).trim();
+                const match = activeIssue.content.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/);
+                const planCta = match ? match[1].trim() : '';
+                const isCtaLocked = globalCta.length > 0 && planCta === globalCta;
+                
+                return (
+                  <button
+                    onClick={() => {
+                      if (planCta) {
+                        if (ctaMode === 'generate') {
+                           setGenerateCtaTemplate(planCta);
+                        } else {
+                           setExactCtaTemplate(planCta);
+                        }
+                        showToast("引流模板已提取并全局锁定", "success");
+                      } else {
+                        showToast("未找到内容，请确认在 '## 3. 引流模板' 的下方是否有内容", "error");
+                      }
+                    }}
+                    className={`flex items-center gap-1.5 px-3 py-1 bg-white border rounded-full text-[10px] font-bold transition-all shadow-sm ${isCtaLocked ? 'border-emerald-200 text-emerald-600' : 'border-[#141414]/10 text-[#141414]/60 hover:bg-[#F5F5F0]'}`}
+                    title={isCtaLocked ? "引流参数目前已完全同步" : "提取当前大纲中的引流模板并锁定为全局参数"}
+                  >
+                    {isCtaLocked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                    {isCtaLocked ? '引流已锁定' : '提取引流模板'}
+                  </button>
+                );
+              })()}
               <motion.button 
                 onClick={saveVersion}
                 animate={isDirty ? { 
@@ -2174,18 +2224,68 @@ export default function App() {
                 </section>
 
                 <section>
-                  <div className="flex items-center gap-2 mb-3">
-                    <label className="text-[10px] uppercase tracking-widest font-bold text-[#141414]/40">默认引流模板 (可选)</label>
-                    <div title={ctaTemplate.trim().length > 0 ? "已锁定全局引流模板" : "当填写内容时即为锁定模式"}>
-                      {ctaTemplate.trim().length > 0 ? <Lock className="w-3 h-3 text-emerald-600" /> : <Unlock className="w-3 h-3 text-[#141414]/20" />}
-                    </div>
+                  <label className="block text-[10px] uppercase tracking-widest font-bold text-[#141414]/40 mb-3">引流与转化策略 (CTA)</label>
+                  <div className="flex bg-[#F5F5F0] p-1 rounded-xl w-full mb-3">
+                    <button
+                      onClick={() => setCtaMode('exact')}
+                      className={`flex-1 py-1.5 text-xs font-bold transition-all rounded-lg ${
+                        ctaMode === 'exact' ? 'bg-white shadow-sm text-[#141414]' : 'text-[#141414]/50'
+                      }`}
+                    >
+                      严格追加原话
+                    </button>
+                    <button
+                      onClick={() => setCtaMode('generate')}
+                      className={`flex-1 py-1.5 text-xs font-bold transition-all rounded-lg ${
+                        ctaMode === 'generate' ? 'bg-white shadow-sm text-[#141414]' : 'text-[#141414]/50'
+                      }`}
+                    >
+                      AI智能生成
+                    </button>
+                    <button
+                      onClick={() => setCtaMode('none')}
+                      className={`flex-1 py-1.5 text-xs font-bold transition-all rounded-lg ${
+                        ctaMode === 'none' ? 'bg-white shadow-sm text-[#141414]' : 'text-[#141414]/50'
+                      }`}
+                    >
+                      无引流
+                    </button>
                   </div>
-                  <textarea 
-                    value={ctaTemplate}
-                    onChange={(e) => setCtaTemplate(e.target.value)}
-                    placeholder="输入将在每篇文章结尾统一追加的模板（留空则根据报告自动生成）。在连载大纲页亦可一键提取锁定。"
-                    className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-2xl text-sm md:font-mono focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[140px] transition-all"
-                  />
+                  
+                  <AnimatePresence>
+                    {ctaMode !== 'none' && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="flex items-center gap-2 mb-3 mt-3">
+                          <label className="text-[10px] uppercase tracking-widest font-bold text-[#141414]/40">
+                            {ctaMode === 'exact' ? '严格引流话术 (原样拼接到文末)' : 'AI 撰写参考要点 (供 AI 围绕生成)'}
+                          </label>
+                          <div title={(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate).trim().length > 0 ? "已配置引流参数" : "填写此项即生效"}>
+                            {(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate).trim().length > 0 ? <Lock className="w-3 h-3 text-emerald-600" /> : <Unlock className="w-3 h-3 text-[#141414]/20" />}
+                          </div>
+                        </div>
+                        {ctaMode === 'exact' ? (
+                          <textarea 
+                            value={exactCtaTemplate}
+                            onChange={(e) => setExactCtaTemplate(e.target.value)}
+                            placeholder="请贴入完整的引流文案、链接或福利说明..."
+                            className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-2xl text-sm md:font-mono focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[140px] transition-all"
+                          />
+                        ) : (
+                          <textarea 
+                            value={generateCtaTemplate}
+                            onChange={(e) => setGenerateCtaTemplate(e.target.value)}
+                            placeholder="例如：吸引加微信领资料，结尾留悬念抛出企业微信二维码..."
+                            className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-2xl text-sm md:font-mono focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[140px] transition-all"
+                          />
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </section>
               </div>
 
@@ -2197,7 +2297,22 @@ export default function App() {
                   </p>
                 )}
                 <button 
-                  onClick={() => setShowConfig(false)}
+                  onClick={() => {
+                    setShowConfig(false);
+                    // 同步修改逻辑：如果正在使用严格模式并且有规划，则同步替换 planning document 的 ## 3. 引流模板 后面内容。
+                    if (ctaMode === 'exact' && exactCtaTemplate.trim() !== '' && serialPlan) {
+                      const planMatch = serialPlan.match(/## 3\.?\s*引流模板\s*([\s\S]*?)(?=##|$)/);
+                      if (planMatch) {
+                        const newPlan = serialPlan.replace(
+                          /(## 3\.?\s*引流模板\s*)([\s\S]*?)(?=##|$)/g, 
+                          `$1\n${exactCtaTemplate.trim()}\n\n`
+                        );
+                        if (newPlan !== serialPlan) {
+                          setSerialPlan(newPlan);
+                        }
+                      }
+                    }
+                  }}
                   className="px-6 py-2 bg-[#141414] text-white rounded-xl text-xs font-bold hover:bg-[#141414]/90 transition-all"
                 >
                   保存配置
@@ -2224,7 +2339,7 @@ export default function App() {
             >
               <div className="p-8 border-b border-[#141414]/5 flex items-center justify-between bg-[#F5F5F0]/30">
                 <div>
-                  <h2 className="text-xl font-serif italic font-bold">报告分解策略与调性</h2>
+                  <h2 className="text-xl font-serif italic font-bold">报告分解策略</h2>
                   <p className="text-xs text-[#141414]/50 mt-1">
                     设定报告分解的目的、要求及整体调性
                   </p>
@@ -2244,25 +2359,84 @@ export default function App() {
                       if (uploadError) setUploadError(null);
                     }}
                     placeholder="例如：将报告分解为适合公众号连载的篇目，每篇字数在1500字左右，强调实战案例..."
-                    className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-2xl text-sm focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[120px] transition-all"
+                    className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-xl text-sm focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[100px] transition-all"
+                  />
+                </section>
+                
+                <section>
+                  <label className="block text-[10px] uppercase tracking-widest font-bold text-[#141414]/40 mb-3">2. 绑定当前热点 (可选)</label>
+                  <textarea 
+                    value={currentHotspot}
+                    onChange={(e) => {
+                      setCurrentHotspot(e.target.value);
+                      if (uploadError) setUploadError(null);
+                    }}
+                    placeholder="输入希望结合的近期热点事件或趋势，AI将尝试在系列策划中借势营销..."
+                    className="w-full p-4 bg-[#F5F5F0]/50 border border-[#141414]/10 rounded-xl text-sm focus:ring-2 focus:ring-[#5A5A40]/20 outline-none min-h-[60px] transition-all"
                   />
                 </section>
 
                 <section>
-                  <label className="block text-[10px] uppercase tracking-widest font-bold text-[#141414]/40 mb-3">2. 整体调性设定</label>
-                  <div className="grid grid-cols-2 gap-3">
+                  <label className="block text-[10px] uppercase tracking-widest font-bold text-[#141414]/40 mb-3">3. 连载期数限制</label>
+                  <div className="flex bg-[#F5F5F0] p-1 rounded-xl w-full max-w-xs mb-3">
+                    <button
+                      onClick={() => setEpisodeMode('auto')}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        episodeMode === 'auto' ? 'bg-white shadow-sm text-[#141414]' : 'text-[#141414]/50'
+                      }`}
+                    >
+                      AI智能决策
+                    </button>
+                    <button
+                      onClick={() => setEpisodeMode('fixed')}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        episodeMode === 'fixed' ? 'bg-white shadow-sm text-[#141414]' : 'text-[#141414]/50'
+                      }`}
+                    >
+                      固定期数
+                    </button>
+                  </div>
+                  
+                  <AnimatePresence>
+                    {episodeMode === 'fixed' && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="flex items-center gap-4 overflow-hidden pt-2"
+                      >
+                        <span className="text-xs text-[#141414]/50">期望规划</span>
+                        <input
+                          type="range"
+                          min="3"
+                          max="20"
+                          value={episodeCount}
+                          onChange={(e) => setEpisodeCount(parseInt(e.target.value))}
+                          className="flex-1 accent-[#5A5A40]"
+                        />
+                        <span className="text-sm font-bold w-12 text-center bg-[#F5F5F0] py-1 rounded-lg border border-[#141414]/5">
+                          {episodeCount} 期
+                        </span>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </section>
+
+                <section>
+                  <label className="block text-[10px] uppercase tracking-widest font-bold text-[#141414]/40 mb-3">3. 整体调性设定</label>
+                  <div className="grid grid-cols-4 gap-2">
                     {TONE_OPTIONS.map((t) => (
                       <button
                         key={t.id}
                         onClick={() => setSelectedTone(t.id)}
-                        className={`p-4 rounded-2xl border text-left transition-all ${
+                        className={`p-3 rounded-2xl border text-left transition-all ${
                           selectedTone === t.id 
                             ? 'border-[#5A5A40] bg-[#5A5A40]/5 ring-1 ring-[#5A5A40]' 
                             : 'border-[#141414]/10 hover:border-[#141414]/20'
                         }`}
                       >
-                        <p className="text-sm font-bold mb-1">{t.label}</p>
-                        <p className="text-[10px] text-[#141414]/50 leading-relaxed">{t.desc}</p>
+                        <p className="text-xs font-bold mb-0.5">{t.label}</p>
+                        <p className="text-[9px] text-[#141414]/50 leading-relaxed max-h-12 overflow-hidden">{t.desc}</p>
                       </button>
                     ))}
                   </div>
@@ -2498,7 +2672,13 @@ export default function App() {
           <>
             <div 
               className="fixed inset-0 z-[110]" 
-              onClick={() => setFloatingMenu({ ...floatingMenu, visible: false })}
+              onClick={() => {
+                if (editor && selectionInfo) {
+                  editor.chain().setTextSelection({ from: selectionInfo.start, to: selectionInfo.end }).unsetHighlight().run();
+                }
+                setFloatingMenu({ ...floatingMenu, visible: false });
+                setSelectionInfo(null);
+              }}
             />
             <motion.div
               initial={{ opacity: 0, scale: 0.9, y: 10 }}
