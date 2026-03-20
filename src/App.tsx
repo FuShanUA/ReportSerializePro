@@ -86,6 +86,7 @@ interface Version {
   version: string;
   content: string;
   timestamp: number;
+  issuesSnapshot?: Chapter[];
 }
 
 const TONE_OPTIONS = [
@@ -137,6 +138,16 @@ const cleanTitle = (rawTitle: string) => {
   return text;
 };
 
+const cleanMarkdown = (text: string) => {
+  if (!text) return '';
+  return text
+    .replace(/[#*`~_>\-]/g, '')
+    .replace(/!\[.*?\]\(.*?\)/g, '')
+    .replace(/\[([^\]]+)\]\(.*?\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 export default function App() {
   const [issues, setIssues] = useState<Chapter[]>(INITIAL_ISSUES);
   const [activeId, setActiveId] = useState<number | 'plan'>('plan');
@@ -162,9 +173,11 @@ export default function App() {
   const issueSelectorRef = useRef<HTMLDivElement>(null);
   const confirmAllRef = useRef<HTMLDivElement>(null);
   const versionMenuRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const updateContentRef = useRef<(newContent: string, shouldCreateVersion?: boolean) => void>(() => {});
   const saveVersionRef = useRef<() => void>(() => {});
+  const printChapterRef = useRef<() => void>(() => {});
   const isUpdatingRef = useRef<boolean>(false);
 
   // Tiptap Editor Setup
@@ -240,6 +253,37 @@ export default function App() {
   const [generateCtaTemplate, setGenerateCtaTemplate] = useState('');
   const [isStateLoaded, setIsStateLoaded] = useState(false);
   const [globalSkills, setGlobalSkills] = useState<{humanizer: string, writingStyle: string}>({ humanizer: '', writingStyle: '' });
+
+  // Intercept global keyboard shortcuts
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Check if Ctrl or Cmd is pressed
+      if (e.ctrlKey || e.metaKey) {
+        // Allow Copy, Paste, Cut, Select All, Undo, Redo, Refresh, Bold, Italic, Underline
+        const allowedKeys = ['c', 'v', 'x', 'a', 'z', 'b', 'i', 'u'];
+        const key = e.key.toLowerCase();
+        
+        if (key === 'p') {
+          e.preventDefault();
+          printChapterRef.current();
+          return;
+        }
+
+        // If it's a letter/key and not in our allowed list, prevent default browser behavior
+        if (key.length === 1 && !allowedKeys.includes(key)) {
+          e.preventDefault();
+          
+          if (key === 's') {
+            // Trigger our own save
+            saveVersionRef.current();
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown, { capture: true });
+  }, []);
 
   // Load state and global skills on mount
   useEffect(() => {
@@ -389,6 +433,10 @@ export default function App() {
     };
   }, [showPublishMenu, showDownloadMenu, showIssueSelector, showConfirmAll, showVersionMenu]);
 
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages, isChatLoading]);
+
   const startResizingSidebar = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setIsResizingSidebar(true);
@@ -408,13 +456,12 @@ export default function App() {
   useEffect(() => {
     const handleClickOutside = () => {
       setActiveQuickActionMenu(null);
-      setShowVersionMenu(false);
     };
-    if (activeQuickActionMenu || showVersionMenu) {
+    if (activeQuickActionMenu) {
       window.addEventListener('click', handleClickOutside);
     }
     return () => window.removeEventListener('click', handleClickOutside);
-  }, [activeQuickActionMenu, showVersionMenu]);
+  }, [activeQuickActionMenu]);
 
   const resize = useCallback((e: MouseEvent) => {
     if (isResizingSidebar) {
@@ -444,6 +491,22 @@ export default function App() {
     {
       title: "引流技巧",
       content: "别忘了在结尾保留“软广”话术！这是引导读者联系后台、转化潜在客户的关键。"
+    },
+    {
+      title: "局部精修",
+      content: "鼠标划选段落文本后，可以直接唤起隐形 AI 菜单，输入具体修改指令（如：换个更有趣的说法）。"
+    },
+    {
+      title: "快捷动作",
+      content: "点击右侧聊天浮窗的小图标菜单，可以快速一键对当前文章进行润色、扩写、精简，或调整风格调性。"
+    },
+    {
+      title: "版本回溯",
+      content: "每次让 AI 重写或生成新内容时，系统都会自动为您保存上一个版本。点击上方标题栏的 V 版本号即可随时找回并切换此前的草稿。"
+    },
+    {
+      title: "防丢锦囊",
+      content: "关闭软件前，可以通过左侧“保存为MD - 保存全部”将所有连载单篇以及系统状态打包为 ZIP 下载，下次直接全盘恢复进度。"
     },
     {
       title: "排版建议",
@@ -600,10 +663,75 @@ export default function App() {
         if (data.episodeMode) setEpisodeMode(data.episodeMode);
         if (data.episodeCount) setEpisodeCount(data.episodeCount);
         if (data.ctaMode) setCtaMode(data.ctaMode);
-        showToast("项目包已成功加载，恢复进度", "success");
-      } else {
-        showToast("压缩包中找不到项目状态文件", "error");
       }
+      
+      // Override state from independent files if they exist
+      const bizFile = zip.file("设定/01_公司业务.md");
+      if (bizFile) setCompanyBusiness((await bizFile.async("string")).trim());
+
+      const ctaFile = zip.file("设定/02_引流模板设定.md");
+      if (ctaFile) {
+        const text = await ctaFile.async("string");
+        const match = text.match(/```json\n([\s\S]*?)\n```/);
+        if (match) {
+          try {
+            const data = JSON.parse(match[1]);
+            if (data.ctaMode) setCtaMode(data.ctaMode);
+            if (data.exactCtaTemplate !== undefined) setExactCtaTemplate(data.exactCtaTemplate);
+            if (data.generateCtaTemplate !== undefined) setGenerateCtaTemplate(data.generateCtaTemplate);
+          } catch (e) {}
+        }
+      }
+
+      const reqFile = zip.file("设定/03_报告分解要求.md");
+      if (reqFile) setReportPurpose((await reqFile.async("string")).trim());
+
+      const hotFile = zip.file("设定/04_热点.md");
+      if (hotFile) setCurrentHotspot((await hotFile.async("string")).trim());
+
+      const epFile = zip.file("设定/05_连载期数设定.md");
+      if (epFile) {
+        const text = await epFile.async("string");
+        const match = text.match(/```json\n([\s\S]*?)\n```/);
+        if (match) {
+          try {
+            const data = JSON.parse(match[1]);
+            if (data.episodeMode) setEpisodeMode(data.episodeMode);
+            if (data.episodeCount !== undefined) setEpisodeCount(data.episodeCount);
+          } catch (e) {}
+        }
+      }
+
+      const toneFile = zip.file("设定/06_调性设定.md");
+      if (toneFile) setSelectedTone((await toneFile.async("string")).trim());
+
+      const planFile = zip.file("规划/最新版本.md");
+      if (planFile) {
+        const content = await planFile.async("string");
+        // Remove the prepended headers we added during save
+        const parts = content.split('## 规划详情\n');
+        if (parts.length > 1) {
+          setSerialPlan(parts[1]);
+        }
+      }
+
+      // Async loading of issue contents:
+      let hasOverriddenIssues = false;
+      const parsedIssuesStr = stateFile ? await stateFile.async("string") : null;
+      let finalIssues = parsedIssuesStr ? JSON.parse(parsedIssuesStr).issues || [] : [];
+      
+      for (let i = 0; i < finalIssues.length; i++) {
+        const issueFile = zip.file(`篇目/${finalIssues[i].title}/最新版本.md`);
+        if (issueFile) {
+          hasOverriddenIssues = true;
+          finalIssues[i].content = await issueFile.async("string");
+        }
+      }
+      if (hasOverriddenIssues) {
+        setIssues(finalIssues);
+      }
+
+      showToast("项目包已成功加载，恢复进度", "success");
     } catch (err) {
       console.error(err);
       showToast("项目包解析失败", "error");
@@ -660,10 +788,25 @@ export default function App() {
       if (data.reportSummary) {
         setReportSummary(data.reportSummary);
       }
-      
+
       const newPlan = data.plan || '';
+      
+      if (planVersions.length > 0) {
+        setPlanVersions(prev => {
+          const newPrev = [...prev];
+          const activeIdx = newPrev.slice().reverse().findIndex(v => v.content === serialPlan);
+          const targetIdx = activeIdx !== -1 ? (newPrev.length - 1 - activeIdx) : (newPrev.length - 1);
+          if (targetIdx >= 0) {
+            newPrev[targetIdx] = { ...newPrev[targetIdx], issuesSnapshot: issues };
+          }
+          const nextVer = getNextVersion(newPlan, newPrev) || `${newPrev.length + 1}.0`;
+          return [...newPrev, { version: nextVer, content: newPlan, timestamp: Date.now() }];
+        });
+      } else {
+        setPlanVersions([{ version: "1.0", content: newPlan, timestamp: Date.now() }]);
+      }
+
       setSerialPlan(newPlan);
-      setPlanVersions([{ version: "1.0", content: newPlan, timestamp: Date.now() }]);
       setIsPlanGenerated(true);
       
       if (data.chapters) {
@@ -835,6 +978,7 @@ export default function App() {
           prevChapters,
           chapterTitle: chapter.title,
           chapterOutline: chapter.outline,
+          serialPlan,
           extraRequirements,
           ctaMode,
           ctaTemplate: ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate,
@@ -914,6 +1058,7 @@ export default function App() {
             prevChapters,
             chapterTitle: chapter.title,
             chapterOutline: chapter.outline,
+            serialPlan,
             ctaMode,
             ctaTemplate: ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate
           }),
@@ -978,28 +1123,28 @@ export default function App() {
             content: activeIssue.content
           })
         });
+        if (!response.ok) throw new Error("API Response not ok");
         const result = await response.json();
         if (result.path) {
           setSavedZipPath(result.path);
           setShowSaveModal(true);
         } else {
-          showToast(`本地保存接口失败，请检查运行环境`, 'error');
+          showToast(`本地保存接口失败，未能获取路径`, 'error');
         }
       } catch (err) {
         console.error('Save file error:', err);
-        showToast(`本地保存接口失败：${err}`, 'error');
+        showToast(`本地文件保存失败：网络或接口异常`, 'error');
       }
     } else {
       const contentIssues = issues.filter(i => i.content && i.content.trim() !== '');
-      if (contentIssues.length === 0 && !isSilent) {
-        showToast("没有已生成内容的篇目，无法保存");
-        return;
-      }
 
       const zip = new JSZip();
       if (contentIssues.length > 0) {
         contentIssues.forEach(issue => {
-          zip.file(`${issue.title}.md`, issue.content);
+          zip.file(`篇目/${issue.title}/最新版本.md`, issue.content);
+          issue.versions.forEach(v => {
+            zip.file(`篇目/${issue.title}/版本历史/V${v.version}.md`, v.content);
+          });
         });
       }
       
@@ -1009,7 +1154,25 @@ export default function App() {
       planContent += `## 整体调性\n${TONE_OPTIONS.find(t => t.id === selectedTone)?.label}\n\n`;
       planContent += `## 全篇提炼总结\n${reportSummary}\n\n`;
       planContent += `## 规划详情\n${serialPlan}\n`;
-      zip.file(`00_生成策略与连载规划.md`, planContent);
+      zip.file(`规划/最新版本.md`, planContent);
+      
+      planVersions.forEach(v => {
+        zip.file(`规划/版本历史/V${v.version}.md`, v.content);
+      });
+
+      // Export settings as independent files
+      zip.file(`设定/01_公司业务.md`, companyBusiness);
+      
+      const ctaData = `\`\`\`json\n${JSON.stringify({ctaMode, exactCtaTemplate, generateCtaTemplate}, null, 2)}\n\`\`\``;
+      zip.file(`设定/02_引流模板设定.md`, ctaData);
+      
+      zip.file(`设定/03_报告分解要求.md`, reportPurpose);
+      zip.file(`设定/04_热点.md`, currentHotspot);
+      
+      const episodeData = `\`\`\`json\n${JSON.stringify({episodeMode, episodeCount}, null, 2)}\n\`\`\``;
+      zip.file(`设定/05_连载期数设定.md`, episodeData);
+      
+      zip.file(`设定/06_调性设定.md`, selectedTone);
 
       let chatContent = `# AI助手对话记录\n\n`;
       chatMessages.forEach((msg, idx) => {
@@ -1051,6 +1214,7 @@ export default function App() {
           },
           body: arrayBuffer
         });
+        if (!response.ok) throw new Error("API Response not ok");
         const result = await response.json();
         if (result.path) {
           if (!isSilent) {
@@ -1058,11 +1222,11 @@ export default function App() {
             setShowSaveModal(true);
           }
         } else {
-          showToast(`离线保存接口异常`, 'error');
+          showToast(`离线打包保存失败，未能获取路径`, 'error');
         }
       } catch (err) {
         console.error('Save failed entirely:', err);
-        showToast(`离线保存接口异常：${err}`, 'error');
+        showToast(`离线保存接口异常：网络异常或服务未启动`, 'error');
       }
     }
     setShowDownloadMenu(false);
@@ -1092,7 +1256,11 @@ export default function App() {
   const handleFloatingEdit = async () => {
     if (!selectionInfo || !floatingPrompt.trim() || isFloatingLoading || !editor) return;
 
+    // Save current version before modification so Undo works
+    saveVersion();
+
     setIsFloatingLoading(true);
+    setIsChatLoading(true);
     setFloatingMenu({ ...floatingMenu, visible: false });
     
     try {
@@ -1105,19 +1273,26 @@ export default function App() {
         model: "gemini-3.1-pro-preview",
         contents: generateFloatingEditPrompt({
           selectionText: selectionInfo.text,
-          prompt: floatingPrompt
+          prompt: floatingPrompt,
+          serialPlan,
+          reportSummary,
+          reportText
         }),
       });
 
       const newText = response.text || '';
       
       // Update the editor: replace text AND remove the highlight mark
-      editor.chain().focus().insertContentAt({ from: selectionInfo.start, to: selectionInfo.end }, newText).unsetHighlight().run();
+      // We explicitly select the text, unset the highlight first to prevent mark inheritance,
+      // and then in a separate transaction we insert the newly generated content.
+      editor.chain().focus().setTextSelection({ from: selectionInfo.start, to: selectionInfo.end }).unsetHighlight().run();
+      editor.chain().focus().setTextSelection({ from: selectionInfo.start, to: selectionInfo.end }).insertContent(newText).run();
 
-      // Push the AI response to the chat area
+      // Push the AI response to the chat area and mark it as a modification to show the Undo button
       setChatMessages([...newChatMessages, { 
         role: 'assistant' as const, 
-        content: `这是修改后的内容：\n\n${newText}\n\n*（已自动应用到左侧编辑器）*` 
+        content: `这是修改后的内容：\n\n${newText}\n\n*（已自动应用到左侧编辑器）*`,
+        isModification: true 
       }]);
 
       setFloatingPrompt("");
@@ -1126,6 +1301,7 @@ export default function App() {
       console.error('Floating edit error:', error);
     } finally {
       setIsFloatingLoading(false);
+      setIsChatLoading(false);
     }
   };
 
@@ -1180,6 +1356,7 @@ export default function App() {
             role: "user",
             parts: [{
               text: generateChatPrompt({
+                serialPlan,
                 reportSummary,
                 reportText,
                 activeContent: activeIssue.content,
@@ -1241,6 +1418,7 @@ export default function App() {
         }
       }
       setSerialPlan(newContent);
+      syncTitlesFromPlan(newContent);
     } else {
       setIssues(prev => prev.map(issue => {
         if (issue.id === activeId) {
@@ -1270,7 +1448,40 @@ export default function App() {
   useEffect(() => {
     updateContentRef.current = handleUpdateContent;
     saveVersionRef.current = saveVersion;
+    printChapterRef.current = handlePrintCurrentChapter;
   });
+
+  const handlePrintCurrentChapter = () => {
+    if (!editor || !activeIssue) return;
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      const htmlContent = editor.getHTML();
+      printWindow.document.write(`
+        <html>
+          <head>
+            <title>${activeIssue.title || '当前篇目'}</title>
+            <style>
+              body { font-family: sans-serif; padding: 2rem; max-width: 800px; margin: 0 auto; line-height: 1.6; color: #141414; }
+              img { max-width: 100%; height: auto; margin: 1rem 0; border-radius: 8px; }
+              table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+              th, td { border: 1px solid #ddd; padding: 12px 8px; text-align: left; }
+              th { background-color: #f5f5f0; }
+              h1, h2, h3, h4 { margin-top: 1.5rem; margin-bottom: 0.5rem; }
+              p { margin-bottom: 1rem; }
+            </style>
+          </head>
+          <body>
+            <h1>${activeIssue.title || '当前篇目'}</h1>
+            ${htmlContent}
+            <script>
+              window.onload = () => { window.print(); window.close(); }
+            </script>
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+    }
+  };
 
   const handleRollback = (msgIndex?: number) => {
     if (activeId === 'plan') {
@@ -1352,8 +1563,22 @@ export default function App() {
 
   const restoreVersion = (version: Version) => {
     if (activeId === 'plan') {
+      setPlanVersions(prev => {
+        const newPrev = [...prev];
+        const activeIdx = newPrev.slice().reverse().findIndex(v => v.content === serialPlan);
+        const targetIdx = activeIdx !== -1 ? (newPrev.length - 1 - activeIdx) : (newPrev.length - 1);
+        if (targetIdx >= 0) {
+          newPrev[targetIdx] = { ...newPrev[targetIdx], issuesSnapshot: issues };
+        }
+        return newPrev;
+      });
+
       setSerialPlan(version.content);
-      syncTitlesFromPlan(version.content);
+      if (version.issuesSnapshot) {
+        setIssues(version.issuesSnapshot);
+      } else {
+        syncTitlesFromPlan(version.content);
+      }
       if (editor) {
         isUpdatingRef.current = true;
         editor.commands.setContent(version.content);
@@ -1406,8 +1631,8 @@ export default function App() {
       >
         <div className="p-8">
           <div className="flex items-center gap-3 mb-8">
-            <div className="w-10 h-10 bg-[#141414] rounded-xl flex items-center justify-center text-white">
-              <BookOpen className="w-6 h-6" />
+            <div className="w-10 h-10 shadow-sm rounded-xl flex items-center justify-center overflow-hidden shrink-0 border border-[#141414]/10 bg-white">
+              <img src="/favicon_v2.png" alt="ReportSerialize Pro Logo" className="w-full h-full object-cover" />
             </div>
             <div>
               <h1 className="text-lg font-serif italic font-bold leading-tight">深度报告连载神器</h1>
@@ -1721,7 +1946,7 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <header className="h-16 border-b border-[#141414]/10 bg-white/80 backdrop-blur-md flex items-center justify-between px-8">
+        <header className="h-16 relative z-[100] border-b border-[#141414]/10 bg-white/80 backdrop-blur-md flex items-center justify-between px-8">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 text-sm font-medium text-[#141414]/60">
               <FileText className="w-4 h-4" />
@@ -1732,7 +1957,10 @@ export default function App() {
                     onClick={() => setShowVersionMenu(!showVersionMenu)}
                     className="ml-2 px-2 py-0.5 bg-[#5A5A40]/10 text-[#5A5A40] text-[10px] rounded-full font-bold flex items-center gap-1 hover:bg-[#5A5A40]/20 transition-colors"
                   >
-                    V{activeIssue.versions[activeIssue.versions.length - 1].version}
+                    V{(() => {
+                      const match = activeIssue.versions.slice().reverse().find(v => v.content === activeIssue.content);
+                      return match ? match.version : (activeIssue.versions[activeIssue.versions.length - 1].version + ' (已编辑)');
+                    })()}
                     <History className="w-2.5 h-2.5" />
                   </button>
                   
@@ -1782,6 +2010,10 @@ export default function App() {
                   <button
                     onClick={() => {
                       if (planCta) {
+                        if (Array.from(cleanMarkdown(planCta)).length > 300) {
+                          showToast("引流部分字数超300字（含图标），无法锁定，调整后保存", "error");
+                          return;
+                        }
                         if (ctaMode === 'generate') {
                            setGenerateCtaTemplate(planCta);
                         } else {
@@ -1943,19 +2175,25 @@ export default function App() {
                       </div>
                     )}
                     
-                    {!activeIssue.content && activeId !== 'plan' ? (
-                      <div className="flex-1 flex flex-col items-center justify-center text-center border-2 border-dashed border-[#141414]/5 rounded-3xl p-12">
-                        <div className="w-16 h-16 bg-[#F5F5F0] rounded-2xl flex items-center justify-center mb-6">
-                          <Feather className="w-8 h-8 text-[#5A5A40]/40" />
+                    <div 
+                      className="flex-1 relative flex flex-col min-h-[500px] cursor-text"
+                      onClick={() => editor?.commands.focus()}
+                    >
+                      {!activeIssue.content && activeId !== 'plan' && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none select-none z-0">
+                          <div className="w-16 h-16 bg-[#F5F5F0] rounded-2xl flex items-center justify-center mb-6">
+                            <Feather className="w-8 h-8 text-[#5A5A40]/30" />
+                          </div>
+                          <h4 className="text-lg font-bold mb-2 text-[#141414]/50">本篇内容尚未生成</h4>
+                          <p className="text-sm text-[#141414]/40 max-w-xs mb-8 leading-relaxed">
+                            点击侧边栏的生成按钮由 AI 撰写初稿。<br/><br/>
+                            或者，您也可以直接在当前白板上手动输入或粘贴内容。
+                          </p>
                         </div>
-                        <h4 className="text-lg font-bold mb-2">本篇内容尚未生成</h4>
-                        <p className="text-sm text-[#141414]/40 max-w-xs mb-8">
-                          点击左边栏下方的按钮，AI 将根据规划大纲、公司业务及前序内容，为您撰写本篇的初稿。
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="markdown-body flex-1">
-                        <article className="prose prose-stone max-w-none 
+                      )}
+                      
+                      <div className="markdown-body flex-1 relative z-10 w-full h-full">
+                        <article className="prose prose-stone max-w-none h-full 
                           prose-headings:font-serif prose-headings:italic prose-headings:text-[#141414] 
                           prose-p:text-[#141414]/80 prose-p:leading-relaxed
                           prose-strong:text-[#141414] 
@@ -1965,10 +2203,10 @@ export default function App() {
                           prose-img:rounded-xl prose-img:shadow-md
                           prose-code:text-[#5A5A40] prose-code:bg-[#5A5A40]/5 prose-code:px-1 prose-code:rounded
                           ">
-                          <EditorContent editor={editor} />
+                          <EditorContent editor={editor} className="h-full min-h-[500px]" />
                         </article>
                       </div>
-                    )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -2042,6 +2280,7 @@ export default function App() {
                       </div>
                     </div>
                   )}
+                  <div ref={messagesEndRef} />
                 </div>
 
                 <div className="p-4 border-t border-[#141414]/10 bg-white">
@@ -2260,12 +2499,17 @@ export default function App() {
                         exit={{ opacity: 0, height: 0 }}
                         className="overflow-hidden"
                       >
-                        <div className="flex items-center gap-2 mb-3 mt-3">
-                          <label className="text-[10px] uppercase tracking-widest font-bold text-[#141414]/40">
-                            {ctaMode === 'exact' ? '严格引流话术 (原样拼接到文末)' : 'AI 撰写参考要点 (供 AI 围绕生成)'}
-                          </label>
-                          <div title={(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate).trim().length > 0 ? "已配置引流参数" : "填写此项即生效"}>
-                            {(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate).trim().length > 0 ? <Lock className="w-3 h-3 text-emerald-600" /> : <Unlock className="w-3 h-3 text-[#141414]/20" />}
+                        <div className="flex items-center justify-between mb-3 mt-3">
+                          <div className="flex items-center gap-2">
+                            <label className="text-[10px] uppercase tracking-widest font-bold text-[#141414]/40">
+                              {ctaMode === 'exact' ? '严格引流话术 (原样拼接到文末)' : 'AI 撰写参考要点 (供 AI 围绕生成)'}
+                            </label>
+                            <div title={(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate).trim().length > 0 ? "已配置引流参数" : "填写此项即生效"}>
+                              {(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate).trim().length > 0 ? <Lock className="w-3 h-3 text-emerald-600" /> : <Unlock className="w-3 h-3 text-[#141414]/20" />}
+                            </div>
+                          </div>
+                          <div className={`text-[10px] font-bold ${Array.from(cleanMarkdown(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate)).length > 300 ? 'text-red-500' : 'text-[#141414]/40'}`}>
+                            {Array.from(cleanMarkdown(ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate)).length} / 300 字
                           </div>
                         </div>
                         {ctaMode === 'exact' ? (
@@ -2298,6 +2542,12 @@ export default function App() {
                 )}
                 <button 
                   onClick={() => {
+                    const activeCta = ctaMode === 'generate' ? generateCtaTemplate : exactCtaTemplate;
+                    if (ctaMode !== 'none' && Array.from(cleanMarkdown(activeCta)).length > 300) {
+                      setUploadError("引流部分字数不可超过300字（含图标），请调整后再保存");
+                      return;
+                    }
+
                     setShowConfig(false);
                     // 同步修改逻辑：如果正在使用严格模式并且有规划，则同步替换 planning document 的 ## 3. 引流模板 后面内容。
                     if (ctaMode === 'exact' && exactCtaTemplate.trim() !== '' && serialPlan) {
@@ -2612,6 +2862,7 @@ export default function App() {
                     try {
                       await fetch('/api/open-folder', {
                         method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ targetPath: savedZipPath })
                       });
                     } catch (e) {}

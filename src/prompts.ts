@@ -118,6 +118,7 @@ export interface GenerateArticleParams {
   prevChapters: string;
   chapterTitle: string;
   chapterOutline: string;
+  serialPlan?: string;
   extraRequirements?: string;
   ctaMode: 'none' | 'generate' | 'exact';
   ctaTemplate: string;
@@ -132,6 +133,9 @@ export function generateArticlePrompt(params: GenerateArticleParams): string {
         【全篇提炼总结】
         ${params.reportSummary.substring(0, 10000)}
         
+        【全篇连载大纲规划 (用于准确预告后续内容)】
+        ${params.serialPlan ? params.serialPlan : '无'}
+        
         【原文完整资料 caching】
         （请根据大纲需要，从以下完整报告中智能调取所需细节及章节，作为素材基础）
         ${params.reportText.substring(0, 500000)}
@@ -145,7 +149,7 @@ export function generateArticlePrompt(params: GenerateArticleParams): string {
         ${params.globalSkills?.humanizer ? `\n\n【Humanizer 去除AI味守则】\n${params.globalSkills.humanizer}\n\n` : ''}
         1. **拒绝浮夸与破折号滥用**：禁用网梗及假大空黑话(赋能、闭环、抓手、卷上天、手搓等)，用正常的行业词汇取代；**绝对禁止使用破折号（—— 或 -）来解释名词或强行转折**，这也是典型的AI翻译腔痕迹！
         2. **读者视角**：少讲大道理，多讲具体的业务场景和真实案例。像人一样面对面讲业务，具备情绪价值和启发性。主张“言之有物，不讲废话”。
-        ${params.ctaMode === 'generate' && params.ctaTemplate ? `5. **引流要求**：在文章结尾（使用 Markdown 引用块 '> '），必须根据以下要点自然地撰写一段引流提示：\n${params.ctaTemplate}` : ''}
+        ${params.ctaMode === 'generate' && params.ctaTemplate ? `5. **引流要求**：在文章结尾（使用 Markdown 引用块 '> '），必须根据以下要点自然地撰写一段引流提示：\n${params.ctaTemplate}\n\n**【极度重要警告：下期预告】**：如果引流要求中涉及到“预告下一期”，你**必须必须**从上文的【全篇连载大纲规划】中寻找严格对应的**下一篇真实标题和提纲**来写预告！**绝对禁止**自己凭空发散和编造任何不存在的标题与环节！` : ''}
         ${params.ctaMode !== 'generate' ? `5. **引流要求**：本文不需要任何附带引流、领福利或关注公众号的引导语。系统会在外部统一处理引流文案，请你绝对不要在正文中输出任何结语类的营销话术，保持结尾清爽。` : ''}
         
         请强执行以上约束，并基于原始报告内容，撰写本篇（${params.chapterTitle}）的完整Markdown内容。`;
@@ -154,11 +158,23 @@ export function generateArticlePrompt(params: GenerateArticleParams): string {
 export interface FloatingEditParams {
   selectionText: string;
   prompt: string;
+  serialPlan?: string;
+  reportSummary?: string;
+  reportText?: string;
 }
 
 export function generateFloatingEditPrompt(params: FloatingEditParams): string {
-  return `你是一个专业的文案编辑。请根据用户的要求修改选中的文本。
+  return `你是一个专业的文案编辑。请根据用户的要求修改或解答选中的文本。
         
+        【全篇提炼总结】
+        ${params.reportSummary ? params.reportSummary.substring(0, 10000) : '未提供'}
+
+        【连载大纲规划】
+        ${params.serialPlan ? params.serialPlan : '未提供'}
+
+        【原文参考资料 caching】
+        ${params.reportText ? params.reportText.substring(0, 500000) : '未提供'}
+
         选中的文本：
         ${params.selectionText}
         
@@ -171,6 +187,7 @@ export function generateFloatingEditPrompt(params: FloatingEditParams): string {
 }
 
 export interface ChatAssistantParams {
+  serialPlan: string;
   reportSummary: string;
   reportText: string;
   activeContent: string;
@@ -184,6 +201,9 @@ export function generateChatPrompt(params: ChatAssistantParams): string {
         
         【全篇提炼总结】
         ${params.reportSummary.length > 0 ? params.reportSummary.substring(0, 10000) : '未提供'}
+
+        【连载规划大纲】
+        ${params.serialPlan.length > 0 ? params.serialPlan : '未提供'}
 
         【原文参考资料】
         (此处为长文本缓存，包含了文章所需的全部基础信息，如果用户提问原报告相关内容，请直接从中查找准确回答，不要胡编乱造)

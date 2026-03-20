@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Continue"
-$WorkingDir = "D:\cc\Library\Tools\reportserialize-pro"
+$WorkingDir = $PSScriptRoot
 Set-Location $WorkingDir
 
 # Ensure node_modules exists
@@ -21,7 +21,7 @@ $IsUp = $false
 while (-not $IsUp -and $Retries -lt 30) {
     try {
         # Temporarily bypass proxy for health check
-        $res = Invoke-RestMethod -Uri "http://127.0.0.1:3001" -TimeoutSec 1 -ErrorAction Stop
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:3001" -TimeoutSec 1 -ErrorAction Stop
         $IsUp = $true
     } catch {
         Start-Sleep -Seconds 1
@@ -31,16 +31,9 @@ while (-not $IsUp -and $Retries -lt 30) {
 
 if ($IsUp) {
     # Launch Edge in app mode with a dedicated profile to avoid icon caching issues. Disable proxy to prevent VPN interference.
-    $edgeProcess = Start-Process -FilePath "msedge.exe" -ArgumentList "--no-proxy-server", "--app=http://127.0.0.1:3001/", "--window-size=1280,800", "--user-data-dir=$env:LOCALAPPDATA\ReportSerializeProApp", "--disable-features=msWebOOUI,msPdfOOUI,msEdgeMiniMenu" -PassThru
-    # Wait for Edge to close
-    Wait-Process -Id $edgeProcess.Id
+    Start-Process -FilePath "msedge.exe" -ArgumentList "--no-proxy-server", "--app=http://127.0.0.1:3001/", "--window-size=1280,800", "--user-data-dir=$env:LOCALAPPDATA\ReportSerializeProApp", "--disable-features=msWebOOUI,msPdfOOUI,msEdgeMiniMenu" -PassThru
 }
 
-# Cleanup Vite process
-try {
-    Stop-Process -Id $viteProcess.Id -Force -ErrorAction SilentlyContinue
-    Get-NetTCPConnection -LocalPort 3001 -ErrorAction SilentlyContinue | ForEach-Object {
-        Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue 
-    }
-} catch {
-}
+# The Vite backend process will stay alive in the background.
+# When this script is run next time, it will automatically kill the old instance listening on 3001.
+

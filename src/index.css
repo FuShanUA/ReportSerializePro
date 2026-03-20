@@ -9,6 +9,11 @@
 }
 
 @layer base {
+  .prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+    font-family: var(--font-serif), "Noto Serif SC", "STSong", "SimSun", serif;
+    font-style: italic;
+    font-weight: bold;
+  }
   .prose table {
     @apply border-collapse border border-[#141414]/10 rounded-lg overflow-hidden w-full my-6;
     table-layout: fixed;
